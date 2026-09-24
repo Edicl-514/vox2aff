@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from vox2aff.catalog import LEVEL_TO_INDEX, SUFFIX_INDEX, restore_db_text
-from vox2aff.convert import convert_chart
+from vox2aff.convert import DEFAULT_LASER_STRENGTH, convert_chart, laser_epsilon
 from vox2aff.vox import parse_vox, read_vox_text
 
 # Slots match Arcade Plus: 0.aff through 4.aff.
@@ -41,10 +41,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="write charts only, skip jacket and audio",
     )
+    parser.add_argument(
+        "--laser-strength",
+        type=int,
+        default=DEFAULT_LASER_STRENGTH,
+        metavar="0-100",
+        help="simplify laser polylines to cut arc density (0 keeps every point, default 20)",
+    )
     args = parser.parse_args(argv)
+    epsilon = laser_epsilon(args.laser_strength)
     source: Path = args.source
     if source.is_file():
-        chart = convert_chart(parse_vox(read_vox_text(source)))
+        chart = convert_chart(parse_vox(read_vox_text(source)), epsilon)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(chart.dumps(), encoding="utf-8")
         print(args.output)
@@ -57,7 +65,13 @@ def main(argv: list[str] | None = None) -> int:
     catalog = _load_catalog(args.music_db) if args.music_db else {}
     args.output.mkdir(parents=True, exist_ok=True)
     for folder in songs:
-        _convert_song(folder, args.output / folder.name, catalog, media=not args.no_media)
+        _convert_song(
+            folder,
+            args.output / folder.name,
+            catalog,
+            media=not args.no_media,
+            laser_epsilon=epsilon,
+        )
     return 0
 
 
@@ -67,7 +81,13 @@ def _song_folders(source: Path) -> list[Path]:
     return sorted(path for path in source.iterdir() if path.is_dir() and any(path.glob("*.vox")))
 
 
-def _convert_song(folder: Path, dest: Path, catalog: dict[str, tuple[str, str, dict[int, str]]], media: bool) -> None:
+def _convert_song(
+    folder: Path,
+    dest: Path,
+    catalog: dict[str, tuple[str, str, dict[int, str]]],
+    media: bool,
+    laser_epsilon: float = 0.0,
+) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     info = catalog.get(folder.name)
     titles = info[2] if info else {}
@@ -82,7 +102,7 @@ def _convert_song(folder: Path, dest: Path, catalog: dict[str, tuple[str, str, d
             continue
         text = read_vox_text(vox_path)
         vox = parse_vox(text)
-        aff = convert_chart(vox)
+        aff = convert_chart(vox, laser_epsilon)
         (dest / f"{difficulty}.aff").write_text(aff.dumps(), encoding="utf-8")
         bpm = vox.bpms[0].bpm
         if base_bpm == 0.0:

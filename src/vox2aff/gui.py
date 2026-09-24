@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSlider,
     QSplitter,
     QStatusBar,
     QTableWidget,
@@ -51,6 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from vox2aff.__main__ import _convert_song
+from vox2aff.convert import DEFAULT_LASER_STRENGTH, laser_epsilon
 from vox2aff.catalog import (
     GENRE_BITS,
     VERSIONS,
@@ -112,6 +114,17 @@ QFrame#cover {
 }
 QSplitter::handle { background: #2a2f38; }
 QStatusBar { color: #b7bdc7; }
+QSlider::groove:horizontal {
+    height: 4px;
+    background: #343a44;
+    border-radius: 2px;
+}
+QSlider::handle:horizontal {
+    width: 14px;
+    margin: -6px 0;
+    background: #2f6fed;
+    border-radius: 7px;
+}
 """
 
 
@@ -205,7 +218,7 @@ class ConvertWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
 
-    def run_job(self, song: Song, dest: Path) -> None:
+    def run_job(self, song: Song, dest: Path, laser_epsilon: float) -> None:
         folder = song.folder
         if folder is None:
             self.failed.emit("这首歌没有谱面文件夹")
@@ -216,7 +229,7 @@ class ConvertWorker(QObject):
         buffer = io.StringIO()
         try:
             with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-                _convert_song(folder, dest, catalog, media=True)
+                _convert_song(folder, dest, catalog, media=True, laser_epsilon=laser_epsilon)
         except Exception:
             self.failed.emit(buffer.getvalue() + traceback.format_exc())
             return
@@ -224,7 +237,7 @@ class ConvertWorker(QObject):
 
 
 class MainWindow(QMainWindow):
-    convert_requested = Signal(object, object)
+    convert_requested = Signal(object, object, float)
 
     def __init__(self) -> None:
         super().__init__()
@@ -412,6 +425,22 @@ class MainWindow(QMainWindow):
         self.table.itemSelectionChanged.connect(self._on_difficulty_changed)
         layout.addWidget(self.table)
 
+        strength = QHBoxLayout()
+        strength.addWidget(QLabel("物量抑制"))
+        self.laser_slider = QSlider(Qt.Orientation.Horizontal)
+        self.laser_slider.setRange(0, 100)
+        self.laser_slider.setValue(DEFAULT_LASER_STRENGTH)
+        self.laser_slider.setToolTip("0 保持逐点转换，100 允许大约 0.10 的横向偏差")
+        self.laser_value = QLabel(str(DEFAULT_LASER_STRENGTH))
+        self.laser_value.setMinimumWidth(28)
+        self.laser_slider.valueChanged.connect(self._on_laser_strength)
+        strength.addWidget(self.laser_slider, 1)
+        strength.addWidget(self.laser_value)
+        layout.addLayout(strength)
+        strength_hint = QLabel("激光折线简化。0 保持原样，数值越大弧线越疏。")
+        strength_hint.setObjectName("hint")
+        layout.addWidget(strength_hint)
+
         actions = QHBoxLayout()
         self.convert_button = QPushButton("转换铺面")
         self.convert_button.setObjectName("convert")
@@ -438,6 +467,12 @@ class MainWindow(QMainWindow):
         if isinstance(output, str) and output:
             self.output_dir = Path(output)
             self.output_edit.setText(output)
+        stored = self.settings.value("laser_strength", DEFAULT_LASER_STRENGTH)
+        try:
+            strength = int(stored)
+        except (TypeError, ValueError):
+            strength = DEFAULT_LASER_STRENGTH
+        self.laser_slider.setValue(max(0, min(100, strength)))
         self._refresh_convert_button()
 
     def _browse(self, kind: str) -> None:
@@ -622,6 +657,10 @@ class MainWindow(QMainWindow):
         self.convert_button.setEnabled(ready)
         self.convert_button.setText("正在转换…" if busy else "转换铺面")
 
+    def _on_laser_strength(self, value: int) -> None:
+        self.laser_value.setText(str(value))
+        self.settings.setValue("laser_strength", value)
+
     def _convert(self) -> None:
         song = self._current_song()
         if song is None or song.folder is None or self.output_dir is None:
@@ -630,11 +669,12 @@ class MainWindow(QMainWindow):
         dest = self.output_dir / song.output_name
         self._converting_name = song.output_name
         self._converting = True
-        self.log.setPlainText(f"开始转换 {song.label}\n→ {dest}")
+        strength = self.laser_slider.value()
+        self.log.setPlainText(f"开始转换 {song.label}\n→ {dest}\n物量抑制 {strength}")
         self.status_label.setText(f"正在转换 {song.output_name}")
         self._ensure_thread()
         self._refresh_convert_button()
-        self.convert_requested.emit(song, dest)
+        self.convert_requested.emit(song, dest, laser_epsilon(strength))
 
     def _ensure_thread(self) -> None:
         if self._thread is not None:

@@ -2,8 +2,10 @@
 
 Ground notes are the four BT buttons, one Arcaea lane each. FX chips become sky taps and FX holds become traces at half height, both
 on Arcade Plus arc color 2 (green), so they sit below the blue and red lasers.
-Laser nodes are straight segments; a slam becomes a short arc and the
-following piece starts when the slam ends.
+Laser nodes are straight segments. Before that, a density setting simplifies
+each laser polyline by horizontal error; a slam stays pinned. Strength 0 keeps
+every point. A slam becomes a short arc and the following piece starts when
+the slam ends.
 """
 
 from __future__ import annotations
@@ -17,6 +19,16 @@ LASER_TRACK = {1: 0, 8: 1}
 FX_X = {0: 0.16, 1: 0.84}
 FX_COLOR = 2
 FX_Y = 0.5
+# Slider 100 allows this much horizontal error, in Arcaea x units (about 0–1).
+LASER_EPSILON_MAX = 0.10
+DEFAULT_LASER_STRENGTH = 20
+
+
+def laser_epsilon(strength: int) -> float:
+    strength = min(100, max(0, int(strength)))
+    if strength <= 0:
+        return 0.0
+    return LASER_EPSILON_MAX * strength / 100
 
 
 def _clamp_x(value: float) -> float:
@@ -35,12 +47,12 @@ def _positive_end(start: int, end: int) -> int:
     return end if end > start else start + 1
 
 
-def convert_chart(chart: VoxChart) -> AffChart:
+def convert_chart(chart: VoxChart, laser_epsilon: float = 0.0) -> AffChart:
     timeline = build_timeline(chart)
     aff = AffChart()
     _write_timing(aff, timeline, chart)
     _write_buttons(aff, chart, timeline)
-    _write_lasers(aff, chart, timeline)
+    _write_lasers(aff, chart, timeline, laser_epsilon)
     _write_fx(aff, chart, timeline)
     return aff
 
@@ -77,7 +89,9 @@ def _write_buttons(aff: AffChart, chart: VoxChart, timeline: Timeline) -> None:
         aff.holds.append(Hold(start, _positive_end(start, end), lane))
 
 
-def _write_lasers(aff: AffChart, chart: VoxChart, timeline: Timeline) -> list[Arc]:
+def _write_lasers(
+    aff: AffChart, chart: VoxChart, timeline: Timeline, laser_epsilon: float = 0.0
+) -> list[Arc]:
     by_track: dict[int, list[LaserPoint]] = {1: [], 8: []}
     for point in chart.lasers:
         if point.track in by_track:
@@ -91,7 +105,9 @@ def _write_lasers(aff: AffChart, chart: VoxChart, timeline: Timeline) -> list[Ar
             if index + 1 < len(segments):
                 nxt = segments[index + 1][0]
                 next_start = timeline.tick(nxt.measure, nxt.beat, nxt.cell)
-            written.extend(_segment_to_arcs(segment, color, timeline, aff, next_start))
+            written.extend(
+                _segment_to_arcs(segment, color, timeline, aff, next_start, laser_epsilon)
+            )
     return written
 
 
@@ -109,18 +125,84 @@ def _segments(points: list[LaserPoint]) -> list[list[LaserPoint]]:
     return segments
 
 
+def _simplify_laser(timed: list[tuple[float, float]], epsilon: float) -> list[tuple[float, float]]:
+    """Drop laser samples whose horizontal error stays within ``epsilon``.
+
+    Points that share a timestamp are slams and stay in place. The error is the
+    distance in x from the chord through the surrounding kept points, so a
+    straight run collapses to one arc and a real bend remains.
+    """
+    if epsilon <= 0 or len(timed) < 3:
+        return timed
+    pins = _laser_pins(timed)
+    kept: list[tuple[float, float]] = []
+    for left, right in zip(pins, pins[1:]):
+        piece = _rdp(timed[left : right + 1], epsilon)
+        if kept:
+            piece = piece[1:]
+        kept.extend(piece)
+    return kept
+
+
+def _laser_pins(timed: list[tuple[float, float]]) -> list[int]:
+    last = len(timed) - 1
+    pins = {0, last}
+    for index in range(1, len(timed)):
+        if timed[index][0] <= timed[index - 1][0]:
+            pins.add(index - 1)
+            pins.add(index)
+    return sorted(pins)
+
+
+def _rdp(points: list[tuple[float, float]], epsilon: float) -> list[tuple[float, float]]:
+    count = len(points)
+    if count < 3:
+        return list(points)
+    keep = [False] * count
+    keep[0] = keep[-1] = True
+    stack = [(0, count - 1)]
+    while stack:
+        start, end = stack.pop()
+        if end <= start + 1:
+            continue
+        t0, x0 = points[start]
+        t1, x1 = points[end]
+        span = t1 - t0
+        max_dev = 0.0
+        split = start
+        for index in range(start + 1, end):
+            tick, position = points[index]
+            if span == 0:
+                deviation = abs(position - x0)
+            else:
+                interpolated = x0 + (x1 - x0) * ((tick - t0) / span)
+                deviation = abs(position - interpolated)
+            if deviation > max_dev:
+                max_dev = deviation
+                split = index
+        if max_dev > epsilon and split != start:
+            keep[split] = True
+            stack.append((start, split))
+            stack.append((split, end))
+    return [point for point, flagged in zip(points, keep) if flagged]
+
+
 def _segment_to_arcs(
     segment: list[LaserPoint],
     color: int,
     timeline: Timeline,
     aff: AffChart,
     next_start: float | None = None,
+    laser_epsilon: float = 0.0,
 ) -> list[Arc]:
     wide = segment[0].wide
-    timed = [
-        (timeline.tick(point.measure, point.beat, point.cell), _laser_x(point.position, wide))
-        for point in segment
-    ]
+    timed = _simplify_laser(
+        [
+            (timeline.tick(point.measure, point.beat, point.cell), _laser_x(point.position, wide))
+            for point in segment
+        ],
+        laser_epsilon,
+    )
     arcs: list[Arc] = []
     # After a slam, the next piece starts when the slam ends, so the two
     # never occupy the same time.
