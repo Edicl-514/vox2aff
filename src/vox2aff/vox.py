@@ -19,6 +19,7 @@ class BpmEvent:
     beat: int
     cell: int
     bpm: float
+    stopped: bool = False
 
 
 @dataclass
@@ -116,7 +117,8 @@ def parse_vox(text: str) -> VoxChart:
         elif section == "#BPM INFO":
             parts = line.split()
             measure, beat, cell = _split_time(parts[0])
-            bpms.append(BpmEvent(measure, beat, cell, float(parts[1])))
+            meter = parts[2] if len(parts) > 2 else ""
+            bpms.append(BpmEvent(measure, beat, cell, float(parts[1]), meter.endswith("-")))
         elif section == "#END POSITION":
             end = _split_time(line.split()[0])
         elif section in {f"#TRACK{i}" for i in range(1, 9)}:
@@ -159,6 +161,7 @@ class Timeline:
     measure_start: dict[int, int]
     meter_at: list[tuple[int, int]]
     bpm_at: list[tuple[int, float]]
+    stopped_ticks: set[int] = field(default_factory=set)
 
     def tick(self, measure: int, beat: int, cell: int) -> int:
         if measure not in self.measure_start:
@@ -218,10 +221,14 @@ def build_timeline(chart: VoxChart) -> Timeline:
         cursor += numerator * chart.resolution
 
     timeline = Timeline(chart.resolution, measure_start, meter_at, [])
-    bpm_at = [
-        (timeline.tick(event.measure, event.beat, event.cell), event.bpm)
-        for event in chart.bpms
-    ]
+    bpm_at: list[tuple[int, float]] = []
+    stopped: set[int] = set()
+    for event in chart.bpms:
+        tick = timeline.tick(event.measure, event.beat, event.cell)
+        bpm_at.append((tick, event.bpm))
+        if event.stopped:
+            stopped.add(tick)
     bpm_at.sort()
     timeline.bpm_at = bpm_at
+    timeline.stopped_ticks = stopped
     return timeline

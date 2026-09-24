@@ -48,6 +48,10 @@ def _write_timing(aff: AffChart, timeline: Timeline, chart: VoxChart) -> None:
         points[0] = (timeline.bpm_at[0][1], float(timeline.meter_on(0)))
     for tick in sorted(points):
         bpm, beats = points[tick]
+        # A trailing '-' on the VOX beat number freezes the highway until the
+        # next tempo event. Note times stay on the audio clock; only the scroll stops.
+        if tick in timeline.stopped_ticks:
+            bpm = 0.0
         aff.timings.append(Timing(timeline.ms(tick), bpm, beats))
 
 
