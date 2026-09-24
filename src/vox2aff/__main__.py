@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from vox2aff.convert import convert_chart
-from vox2aff.vox import parse_vox
+from vox2aff.vox import parse_vox, read_vox_text
 
 DIFFICULTY = {
     "1n": 0,
@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     source: Path = args.source
     if source.is_file():
-        chart = convert_chart(parse_vox(source.read_text(encoding="utf-8")))
+        chart = convert_chart(parse_vox(read_vox_text(source)))
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(chart.dumps(), encoding="utf-8")
         print(args.output)
@@ -83,7 +83,7 @@ def _convert_song(folder: Path, dest: Path, catalog: dict[str, tuple[str, str, d
         if difficulty is None:
             print(f"skip {vox_path.name}: unknown difficulty suffix", file=sys.stderr)
             continue
-        text = vox_path.read_text(encoding="utf-8")
+        text = read_vox_text(vox_path)
         vox = parse_vox(text)
         aff = convert_chart(vox)
         (dest / f"{difficulty}.aff").write_text(aff.dumps(), encoding="utf-8")

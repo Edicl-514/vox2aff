@@ -1,8 +1,9 @@
-"""Parser for SOUND VOLTEX OUTPUT TEXT FILE (VOX format version 13)."""
+"""Parser for SOUND VOLTEX OUTPUT TEXT FILE (VOX format versions 10 through 13)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -57,6 +58,29 @@ def _split_time(token: str) -> tuple[int, int, int]:
     return int(measure), int(beat), int(cell)
 
 
+# Versions 10 and earlier store a laser knob as an integer from 0 to 127.
+# Versions 12 and 13 store the same knob as a 0–1 float, with the same
+# point codes: 1 starts a segment, 0 continues it, 2 ends it.
+LASER_POSITION_MAX = 127
+SUPPORTED_VERSIONS = range(10, 14)
+
+
+def _laser_position(token: str) -> float:
+    if "." in token:
+        return float(token)
+    return int(token) / LASER_POSITION_MAX
+
+
+def read_vox_text(path: Path) -> str:
+    raw = path.read_bytes()
+    for encoding in ("utf-8", "cp932"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("cp932", errors="replace")
+
+
 def parse_vox(text: str) -> VoxChart:
     resolution = 48
     time_sigs: list[TimeSig] = []
@@ -81,7 +105,7 @@ def parse_vox(text: str) -> VoxChart:
 
         if section == "#FORMAT VERSION":
             version = int(line)
-            if version != 13:
+            if version not in SUPPORTED_VERSIONS:
                 raise ValueError(f"unsupported VOX format version {version}")
         elif section == "#BEAT RESOLUTION":
             resolution = int(line)
@@ -99,14 +123,14 @@ def parse_vox(text: str) -> VoxChart:
             track = int(section.removeprefix("#TRACK"))
             parts = line.split()
             measure, beat, cell = _split_time(parts[0])
-            if "." in parts[1]:
+            if track in {1, 8}:
                 lasers.append(
                     LaserPoint(
                         track,
                         measure,
                         beat,
                         cell,
-                        float(parts[1]),
+                        _laser_position(parts[1]),
                         int(parts[2]),
                     )
                 )
