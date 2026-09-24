@@ -10,9 +10,16 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
-LEVEL_NAMES = ("novice", "advanced", "exhaust", "infinite", "maximum")
-CHART_SUFFIX = {0: "1n", 1: "2a", 2: "3e", 3: "4i", 4: "5m"}
-SUFFIX_INDEX = {suffix: index for index, suffix in CHART_SUFFIX.items()}
+# Arcade Plus only opens 0.aff–4.aff. Ultimate uses the last slot, the same one as Maximum.
+LEVEL_TO_INDEX = {
+    "novice": 0,
+    "advanced": 1,
+    "exhaust": 2,
+    "infinite": 3,
+    "maximum": 4,
+    "ultimate": 4,
+}
+SUFFIX_INDEX = {"1n": 0, "2a": 1, "3e": 2, "4i": 3, "5m": 4, "6u": 4}
 
 VERSIONS = {
     1: "BOOTH",
@@ -46,6 +53,7 @@ class Difficulty:
     level: str
     illustrator: str
     effector: str
+    kind: str = ""
 
 
 @dataclass
@@ -81,6 +89,9 @@ class Song:
     def difficulty_name(self, index: int) -> str:
         if index == 3:
             return INFINITE_NAMES.get(self.inf_ver, "INF")
+        item = self.difficulties.get(index)
+        if item is not None and item.kind == "ultimate":
+            return "ULT"
         return DIFFICULTY_NAMES[index]
 
     def rating_map(self) -> dict[int, str]:
@@ -209,7 +220,7 @@ def _difficulties(node: ET.Element | None) -> dict[int, Difficulty]:
     if node is None:
         return {}
     found: dict[int, Difficulty] = {}
-    for index, name in enumerate(LEVEL_NAMES):
+    for name, index in LEVEL_TO_INDEX.items():
         level_node = node.find(name)
         if level_node is None:
             continue
@@ -218,6 +229,7 @@ def _difficulties(node: ET.Element | None) -> dict[int, Difficulty]:
             level=_format_level(level_node.findtext("difnum")),
             illustrator=(level_node.findtext("illustrator") or "").strip(),
             effector=(level_node.findtext("effected_by") or "").strip(),
+            kind=name,
         )
     return found
 
@@ -226,8 +238,8 @@ def _jackets(folder: Path | None, folder_id: str) -> dict[int, Path]:
     if folder is None:
         return {}
     found: dict[int, Path] = {}
-    for index in range(5):
-        path = folder / f"jk_{folder_id}_{index + 1}.png"
+    for suffix, index in SUFFIX_INDEX.items():
+        path = folder / f"jk_{folder_id}_{suffix[0]}.png"
         if path.is_file():
             found[index] = path
     return found

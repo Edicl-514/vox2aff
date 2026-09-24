@@ -10,17 +10,14 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from vox2aff.catalog import LEVEL_TO_INDEX, SUFFIX_INDEX
 from vox2aff.convert import convert_chart
 from vox2aff.vox import parse_vox, read_vox_text
 
-DIFFICULTY = {
-    "1n": 0,
-    "2a": 1,
-    "3e": 2,
-    "4i": 3,
-    "5m": 4,
-}
+# Slots match Arcade Plus: 0.aff through 4.aff.
+DIFFICULTY = SUFFIX_INDEX
 DIFFICULTY_COUNT = 5
+LEVEL_TO_DIFF = LEVEL_TO_INDEX
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -145,7 +142,6 @@ def _load_catalog(path: Path) -> dict[str, tuple[str, str, dict[int, str]]]:
         text = raw.decode("cp932", errors="replace")
     root = ET.fromstring(text)
     catalog: dict[str, tuple[str, str, dict[int, str]]] = {}
-    level_to_diff = {"novice": 0, "advanced": 1, "exhaust": 2, "infinite": 3, "maximum": 4}
     for music in root.findall("music"):
         info = music.find("info")
         if info is None:
@@ -156,7 +152,7 @@ def _load_catalog(path: Path) -> dict[str, tuple[str, str, dict[int, str]]]:
         ratings: dict[int, str] = {}
         difficulty = music.find("difficulty")
         if difficulty is not None:
-            for name, index in level_to_diff.items():
+            for name, index in LEVEL_TO_DIFF.items():
                 node = difficulty.find(name)
                 if node is None:
                     continue
