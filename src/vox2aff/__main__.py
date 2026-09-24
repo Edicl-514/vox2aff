@@ -11,7 +11,14 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from vox2aff.catalog import LEVEL_TO_INDEX, SUFFIX_INDEX, restore_db_text
-from vox2aff.convert import DEFAULT_LASER_STRENGTH, convert_chart, laser_epsilon
+from vox2aff.convert import (
+    DEFAULT_LASER_STRENGTH,
+    DEFAULT_STRAIGHT_LASER,
+    STRAIGHT_LASER_MODES,
+    convert_chart,
+    laser_epsilon,
+    straight_laser_mode,
+)
 from vox2aff.vox import parse_vox, read_vox_text
 
 # Slots match Arcade Plus: 0.aff through 4.aff.
@@ -48,11 +55,18 @@ def main(argv: list[str] | None = None) -> int:
         metavar="0-100",
         help="simplify laser polylines to cut arc density (0 keeps every point, default 20)",
     )
+    parser.add_argument(
+        "--straight-laser",
+        choices=STRAIGHT_LASER_MODES,
+        default=DEFAULT_STRAIGHT_LASER,
+        help="straight lasers: keep, noinput (shown, no judgment, default), or black (guide line)",
+    )
     args = parser.parse_args(argv)
     epsilon = laser_epsilon(args.laser_strength)
+    straight = straight_laser_mode(args.straight_laser)
     source: Path = args.source
     if source.is_file():
-        chart = convert_chart(parse_vox(read_vox_text(source)), epsilon)
+        chart = convert_chart(parse_vox(read_vox_text(source)), epsilon, straight)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(chart.dumps(), encoding="utf-8")
         print(args.output)
@@ -71,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
             catalog,
             media=not args.no_media,
             laser_epsilon=epsilon,
+            straight_laser=straight,
         )
     return 0
 
@@ -87,6 +102,7 @@ def _convert_song(
     catalog: dict[str, tuple[str, str, dict[int, str]]],
     media: bool,
     laser_epsilon: float = 0.0,
+    straight_laser: str = DEFAULT_STRAIGHT_LASER,
 ) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     info = catalog.get(folder.name)
@@ -102,7 +118,7 @@ def _convert_song(
             continue
         text = read_vox_text(vox_path)
         vox = parse_vox(text)
-        aff = convert_chart(vox, laser_epsilon)
+        aff = convert_chart(vox, laser_epsilon, straight_laser)
         (dest / f"{difficulty}.aff").write_text(aff.dumps(), encoding="utf-8")
         bpm = vox.bpms[0].bpm
         if base_bpm == 0.0:

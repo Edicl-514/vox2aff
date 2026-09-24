@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from vox2aff.__main__ import _convert_song
-from vox2aff.convert import DEFAULT_LASER_STRENGTH, laser_epsilon
+from vox2aff.convert import DEFAULT_LASER_STRENGTH, DEFAULT_STRAIGHT_LASER, laser_epsilon
 from vox2aff.catalog import (
     GENRE_BITS,
     VERSIONS,
@@ -218,7 +218,7 @@ class ConvertWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
 
-    def run_job(self, song: Song, dest: Path, laser_epsilon: float) -> None:
+    def run_job(self, song: Song, dest: Path, laser_epsilon: float, straight_laser: str) -> None:
         folder = song.folder
         if folder is None:
             self.failed.emit("这首歌没有谱面文件夹")
@@ -229,7 +229,14 @@ class ConvertWorker(QObject):
         buffer = io.StringIO()
         try:
             with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-                _convert_song(folder, dest, catalog, media=True, laser_epsilon=laser_epsilon)
+                _convert_song(
+                    folder,
+                    dest,
+                    catalog,
+                    media=True,
+                    laser_epsilon=laser_epsilon,
+                    straight_laser=straight_laser,
+                )
         except Exception:
             self.failed.emit(buffer.getvalue() + traceback.format_exc())
             return
@@ -237,7 +244,7 @@ class ConvertWorker(QObject):
 
 
 class MainWindow(QMainWindow):
-    convert_requested = Signal(object, object, float)
+    convert_requested = Signal(object, object, float, str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -441,6 +448,17 @@ class MainWindow(QMainWindow):
         strength_hint.setObjectName("hint")
         layout.addWidget(strength_hint)
 
+        straight = QHBoxLayout()
+        straight.addWidget(QLabel("直线激光"))
+        self.straight_box = QComboBox()
+        self.straight_box.addItem("不抑制", "keep")
+        self.straight_box.addItem("noinput", "noinput")
+        self.straight_box.addItem("只显示黑线", "black")
+        self.straight_box.setToolTip("位置不变的激光。noinput 仍显示彩色弧线但不判定")
+        self.straight_box.currentIndexChanged.connect(self._on_straight_laser)
+        straight.addWidget(self.straight_box, 1)
+        layout.addLayout(straight)
+
         actions = QHBoxLayout()
         self.convert_button = QPushButton("转换铺面")
         self.convert_button.setObjectName("convert")
@@ -473,6 +491,9 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             strength = DEFAULT_LASER_STRENGTH
         self.laser_slider.setValue(max(0, min(100, strength)))
+        stored_straight = self.settings.value("straight_laser", DEFAULT_STRAIGHT_LASER)
+        straight_index = self.straight_box.findData(str(stored_straight))
+        self.straight_box.setCurrentIndex(straight_index if straight_index >= 0 else 1)
         self._refresh_convert_button()
 
     def _browse(self, kind: str) -> None:
@@ -657,6 +678,11 @@ class MainWindow(QMainWindow):
         self.convert_button.setEnabled(ready)
         self.convert_button.setText("正在转换…" if busy else "转换铺面")
 
+    def _on_straight_laser(self) -> None:
+        mode = self.straight_box.currentData()
+        if isinstance(mode, str):
+            self.settings.setValue("straight_laser", mode)
+
     def _on_laser_strength(self, value: int) -> None:
         self.laser_value.setText(str(value))
         self.settings.setValue("laser_strength", value)
@@ -670,11 +696,16 @@ class MainWindow(QMainWindow):
         self._converting_name = song.output_name
         self._converting = True
         strength = self.laser_slider.value()
-        self.log.setPlainText(f"开始转换 {song.label}\n→ {dest}\n物量抑制 {strength}")
+        straight = self.straight_box.currentData()
+        if not isinstance(straight, str):
+            straight = DEFAULT_STRAIGHT_LASER
+        self.log.setPlainText(
+            f"开始转换 {song.label}\n→ {dest}\n物量抑制 {strength}\n直线激光 {straight}"
+        )
         self.status_label.setText(f"正在转换 {song.output_name}")
         self._ensure_thread()
         self._refresh_convert_button()
-        self.convert_requested.emit(song, dest, laser_epsilon(strength))
+        self.convert_requested.emit(song, dest, laser_epsilon(strength), straight)
 
     def _ensure_thread(self) -> None:
         if self._thread is not None:

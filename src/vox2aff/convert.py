@@ -22,6 +22,15 @@ FX_Y = 0.5
 # Slider 100 allows this much horizontal error, in Arcaea x units (about 0–1).
 LASER_EPSILON_MAX = 0.10
 DEFAULT_LASER_STRENGTH = 20
+STRAIGHT_LASER_MODES = ("keep", "noinput", "black")
+DEFAULT_STRAIGHT_LASER = "noinput"
+
+
+def straight_laser_mode(value: str) -> str:
+    text = str(value).strip().lower()
+    if text in STRAIGHT_LASER_MODES:
+        return text
+    return DEFAULT_STRAIGHT_LASER
 
 
 def laser_epsilon(strength: int) -> float:
@@ -47,12 +56,16 @@ def _positive_end(start: int, end: int) -> int:
     return end if end > start else start + 1
 
 
-def convert_chart(chart: VoxChart, laser_epsilon: float = 0.0) -> AffChart:
+def convert_chart(
+    chart: VoxChart,
+    laser_epsilon: float = 0.0,
+    straight_laser: str = DEFAULT_STRAIGHT_LASER,
+) -> AffChart:
     timeline = build_timeline(chart)
     aff = AffChart()
     _write_timing(aff, timeline, chart)
     _write_buttons(aff, chart, timeline)
-    _write_lasers(aff, chart, timeline, laser_epsilon)
+    _write_lasers(aff, chart, timeline, laser_epsilon, straight_laser_mode(straight_laser))
     _write_fx(aff, chart, timeline)
     return aff
 
@@ -90,7 +103,11 @@ def _write_buttons(aff: AffChart, chart: VoxChart, timeline: Timeline) -> None:
 
 
 def _write_lasers(
-    aff: AffChart, chart: VoxChart, timeline: Timeline, laser_epsilon: float = 0.0
+    aff: AffChart,
+    chart: VoxChart,
+    timeline: Timeline,
+    laser_epsilon: float = 0.0,
+    straight_laser: str = DEFAULT_STRAIGHT_LASER,
 ) -> list[Arc]:
     by_track: dict[int, list[LaserPoint]] = {1: [], 8: []}
     for point in chart.lasers:
@@ -106,7 +123,9 @@ def _write_lasers(
                 nxt = segments[index + 1][0]
                 next_start = timeline.tick(nxt.measure, nxt.beat, nxt.cell)
             written.extend(
-                _segment_to_arcs(segment, color, timeline, aff, next_start, laser_epsilon)
+                _segment_to_arcs(
+                    segment, color, timeline, aff, next_start, laser_epsilon, straight_laser
+                )
             )
     return written
 
@@ -194,6 +213,7 @@ def _segment_to_arcs(
     aff: AffChart,
     next_start: float | None = None,
     laser_epsilon: float = 0.0,
+    straight_laser: str = DEFAULT_STRAIGHT_LASER,
 ) -> list[Arc]:
     wide = segment[0].wide
     timed = _simplify_laser(
@@ -234,9 +254,20 @@ def _segment_to_arcs(
         start = timeline.ms(start_tick)
         end = _positive_end(start, timeline.ms(end_tick))
         arc = Arc(start, end, position, next_position, color=color)
+        if _is_straight_laser(position, next_position):
+            if straight_laser == "noinput":
+                arc.noinput = True
+            elif straight_laser == "black":
+                arc.is_void = True
         aff.arcs.append(arc)
         arcs.append(arc)
     return arcs
+
+
+def _is_straight_laser(x_start: float, x_end: float) -> bool:
+    # The file writes x to two decimals. A segment that stays on one of those
+    # positions is a straight laser: SDVX does not require the knob there.
+    return round(x_start, 2) == round(x_end, 2)
 
 
 def _write_fx(aff: AffChart, chart: VoxChart, timeline: Timeline) -> None:

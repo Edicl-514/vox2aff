@@ -46,6 +46,7 @@ class Arc:
     curve: str = "s"
     effect: str = "none"
     is_void: bool = False
+    noinput: bool = False
     arc_taps: list[ArcTap] = field(default_factory=list)
 
     @property
@@ -78,16 +79,30 @@ class AffChart:
             events.append(
                 (hold.time, 2, f"hold({hold.time},{hold.end},{hold.lane});")
             )
+        noinput = [arc for arc in self.arcs if arc.noinput]
         for arc in self.arcs:
-            body = (
-                f"arc({arc.time},{arc.end},{arc.x_start:.2f},{arc.x_end:.2f},"
-                f"{arc.curve},{arc.y_start:.2f},{arc.y_end:.2f},{arc.color},"
-                f"{arc.effect},{'true' if arc.is_void else 'false'})"
-            )
-            if arc.arc_taps:
-                taps = ",".join(f"arctap({tap.time})" for tap in arc.arc_taps)
-                body += f"[{taps}]"
-            events.append((arc.time, 3, body + ";"))
+            if arc.noinput:
+                continue
+            events.append((arc.time, 3, _arc_text(arc)))
         events.sort()
         lines.extend(text for _time, _order, text in events)
+        if noinput:
+            lines.append("timinggroup(noinput){")
+            for timing in self.timings:
+                lines.append(f"timing({timing.time},{timing.bpm:.2f},{timing.beats:.2f});")
+            for arc in sorted(noinput, key=lambda item: (item.time, item.end)):
+                lines.append(_arc_text(arc))
+            lines.append("};")
         return "\n".join(lines) + "\n"
+
+
+def _arc_text(arc: Arc) -> str:
+    body = (
+        f"arc({arc.time},{arc.end},{arc.x_start:.2f},{arc.x_end:.2f},"
+        f"{arc.curve},{arc.y_start:.2f},{arc.y_end:.2f},{arc.color},"
+        f"{arc.effect},{'true' if arc.is_void else 'false'})"
+    )
+    if arc.arc_taps:
+        taps = ",".join(f"arctap({tap.time})" for tap in arc.arc_taps)
+        body += f"[{taps}]"
+    return body + ";"
