@@ -54,16 +54,35 @@ _DB_CHARACTERS = str.maketrans(
         "\u5f5c": "ū",
         "\u66e6": "à",
         "\u66e9": "è",
+        "\u7011": "a",
+        "\u7162": "ö",
+        "\u7589": "Ö",
+        "\u76e5": "o",
+        "\u7f47": "ê",
+        "\u8d81": "æ",
+        "\u8e59": "f",
         "\u8e94": "🐾",
+        "\u9452": "₩",
+        "\u95c3": "A",
+        "\u968d": "Ü",
+        "\u96cb": "U",
+        "\u983d": "ä",
         "\u9a2b": "á",
         "\u9a69": "Ø",
         "\u9a6b": "ā",
         "\u9a6a": "ō",
         "\u9aad": "ü",
+        "\u9b06": "Y",
+        "\u9b25": "A",
+        "\u9b2e": "¡",
         "\u9b2f": "ī",
+        "\u9b3b": "×",
+        "\u9e79": "h",
+        "\u9efb": "*",
         "\u9ef7": "ē",
         "\u9f63": "Ú",
         "\u9f67": "Ä",
+        "\u9f95": "C",
         "\u973b": "♠",
         "\u9f6a": "♣",
         "\u9448": "♦",
@@ -100,6 +119,7 @@ class Song:
     genre: int
     release_date: str
     inf_ver: int
+    peak_level: float = -1.0
     difficulties: dict[int, Difficulty] = field(default_factory=dict)
     folder: Path | None = None
     jackets: dict[int, Path] = field(default_factory=dict)
@@ -228,6 +248,7 @@ def _song_from_element(music: ET.Element, folders: dict[str, Path]) -> Song:
         genre=genre,
         release_date=release_date,
         inf_ver=inf_ver,
+        peak_level=_peak_level(music.find("difficulty")),
         difficulties=_difficulties(music.find("difficulty")),
         folder=folder,
         jackets=_jackets(folder, folder_id),
@@ -245,6 +266,23 @@ def _locate_folder(folders: dict[str, Path], music_id: str, ascii_name: str) -> 
             if folder is not None:
                 return folder, key.split("_", 1)[0]
     return None, padded
+
+
+def _peak_level(node: ET.Element | None) -> float:
+    if node is None:
+        return -1.0
+    best = -1.0
+    for name in LEVEL_TO_INDEX:
+        level_node = node.find(name)
+        if level_node is None:
+            continue
+        raw = level_node.findtext("difnum")
+        if not raw or not raw.strip().lstrip("-").isdigit():
+            continue
+        value = int(raw) / 10
+        if value > best:
+            best = value
+    return best
 
 
 def _difficulties(node: ET.Element | None) -> dict[int, Difficulty]:

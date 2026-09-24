@@ -193,6 +193,11 @@ def _sort_key(song: Song, key: str) -> tuple:
         return (song.bpm_max, song.number)
     if key == "version":
         return (song.version, song.number)
+    if key == "date":
+        dated = len(song.release_date) >= 8 and song.release_date[:8].isdigit()
+        return (not dated, song.release_date[:8] if dated else "", song.number)
+    if key == "level":
+        return (song.peak_level < 0, song.peak_level, song.number)
     return (song.number,)
 
 
@@ -200,23 +205,18 @@ class ConvertWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, song: Song, dest: Path) -> None:
-        super().__init__()
-        self.song = song
-        self.dest = dest
-
-    def run(self) -> None:
-        folder = self.song.folder
+    def run_job(self, song: Song, dest: Path) -> None:
+        folder = song.folder
         if folder is None:
             self.failed.emit("这首歌没有谱面文件夹")
             return
         catalog = {
-            folder.name: (self.song.title, self.song.artist, self.song.rating_map()),
+            folder.name: (song.title, song.artist, song.rating_map()),
         }
         buffer = io.StringIO()
         try:
             with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-                _convert_song(folder, self.dest, catalog, media=True)
+                _convert_song(folder, dest, catalog, media=True)
         except Exception:
             self.failed.emit(buffer.getvalue() + traceback.format_exc())
             return
@@ -224,6 +224,8 @@ class ConvertWorker(QObject):
 
 
 class MainWindow(QMainWindow):
+    convert_requested = Signal(object, object)
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("vox2aff")
@@ -234,6 +236,7 @@ class MainWindow(QMainWindow):
         self.songs: list[Song] = []
         self._thread: QThread | None = None
         self._worker: ConvertWorker | None = None
+        self._converting = False
         self._converting_name = ""
 
         self.model = SongListModel()
@@ -302,6 +305,8 @@ class MainWindow(QMainWindow):
         self.sort_box.addItem("按艺术家", "artist")
         self.sort_box.addItem("按 BPM", "bpm")
         self.sort_box.addItem("按版本", "version")
+        self.sort_box.addItem("按配信日", "date")
+        self.sort_box.addItem("按难度", "level")
         self.sort_box.currentIndexChanged.connect(self._apply_filter)
         self.version_box = QComboBox()
         self.version_box.addItem("全部版本", None)
@@ -606,7 +611,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_convert_button(self) -> None:
         song = self._current_song()
-        busy = self._thread is not None
+        busy = self._converting
         ready = (
             song is not None
             and song.folder is not None
@@ -624,42 +629,44 @@ class MainWindow(QMainWindow):
             return
         dest = self.output_dir / song.output_name
         self._converting_name = song.output_name
+        self._converting = True
         self.log.setPlainText(f"开始转换 {song.label}\n→ {dest}")
         self.status_label.setText(f"正在转换 {song.output_name}")
+        self._ensure_thread()
+        self._refresh_convert_button()
+        self.convert_requested.emit(song, dest)
+
+    def _ensure_thread(self) -> None:
+        if self._thread is not None:
+            return
         thread = QThread(self)
-        worker = ConvertWorker(song, dest)
+        worker = ConvertWorker()
         worker.moveToThread(thread)
-        thread.started.connect(worker.run)
+        self.convert_requested.connect(worker.run_job)
         worker.finished.connect(self._on_converted)
         worker.failed.connect(self._on_convert_failed)
-        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
-        worker.failed.connect(thread.quit, Qt.ConnectionType.DirectConnection)
-        thread.finished.connect(self._on_thread_finished)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+        thread.start()
         self._thread = thread
         self._worker = worker
-        self._refresh_convert_button()
-        thread.start()
 
     def _on_converted(self, log: str) -> None:
         if log:
             self.log.appendPlainText(log)
         self.status_label.setText(f"转换完成：{self._converting_name}")
+        self._converting = False
+        self._refresh_convert_button()
 
     def _on_convert_failed(self, message: str) -> None:
         self.log.appendPlainText(message)
         self.status_label.setText("转换失败")
-        QMessageBox.critical(self, "转换失败", message[-1200:])
-
-    def _on_thread_finished(self) -> None:
-        self._thread = None
-        self._worker = None
+        self._converting = False
         self._refresh_convert_button()
+        QMessageBox.critical(self, "转换失败", message[-1200:])
 
     def closeEvent(self, event) -> None:  # noqa: N802
         thread = self._thread
-        if thread is not None and thread.isRunning():
+        if thread is not None:
+            thread.quit()
             thread.wait()
         super().closeEvent(event)
 
