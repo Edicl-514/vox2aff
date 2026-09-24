@@ -1,4 +1,5 @@
 Arcade-plus/
-iidx_sample_data/
-sdvx_sample_data/
-arcaea_sample_data/
+**data/
+**converted/
+**converted-iidx/
+**__pycache__/
