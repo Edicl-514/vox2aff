@@ -19,8 +19,16 @@ FX_COLOR = 2
 FX_Y = 0.5
 
 
-def _clamp01(value: float) -> float:
-    return min(1.0, max(0.0, value))
+def _clamp_x(value: float) -> float:
+    return min(1.5, max(-0.5, value))
+
+
+def _laser_x(position: float, wide: bool) -> float:
+    # A 2x laser stores the knob in 0–1, but the beam is twice as wide,
+    # so the same reading covers -0.5 to 1.5.
+    if wide:
+        position = position * 2 - 0.5
+    return _clamp_x(position)
 
 
 def _positive_end(start: int, end: int) -> int:
@@ -77,8 +85,13 @@ def _write_lasers(aff: AffChart, chart: VoxChart, timeline: Timeline) -> list[Ar
     written: list[Arc] = []
     for track, points in by_track.items():
         color = LASER_TRACK[track]
-        for segment in _segments(points):
-            written.extend(_segment_to_arcs(segment, color, timeline, aff))
+        segments = _segments(points)
+        for index, segment in enumerate(segments):
+            next_start = None
+            if index + 1 < len(segments):
+                nxt = segments[index + 1][0]
+                next_start = timeline.tick(nxt.measure, nxt.beat, nxt.cell)
+            written.extend(_segment_to_arcs(segment, color, timeline, aff, next_start))
     return written
 
 
@@ -97,16 +110,21 @@ def _segments(points: list[LaserPoint]) -> list[list[LaserPoint]]:
 
 
 def _segment_to_arcs(
-    segment: list[LaserPoint], color: int, timeline: Timeline, aff: AffChart
+    segment: list[LaserPoint],
+    color: int,
+    timeline: Timeline,
+    aff: AffChart,
+    next_start: float | None = None,
 ) -> list[Arc]:
+    wide = segment[0].wide
     timed = [
-        (timeline.tick(point.measure, point.beat, point.cell), _clamp01(point.position))
+        (timeline.tick(point.measure, point.beat, point.cell), _laser_x(point.position, wide))
         for point in segment
     ]
     arcs: list[Arc] = []
     # After a slam, the next piece starts when the slam ends, so the two
     # never occupy the same time.
-    carry: int | None = None
+    carry: float | None = None
     for index, (tick, position) in enumerate(timed[:-1]):
         next_tick, next_position = timed[index + 1]
         start_tick = tick if carry is None else max(tick, carry)
@@ -114,10 +132,17 @@ def _segment_to_arcs(
         if slam:
             later = next(
                 (item[0] for item in timed[index + 1 :] if item[0] > tick),
-                tick + timeline.resolution,
+                None,
             )
+            if later is None:
+                if next_start is not None and next_start > start_tick:
+                    later = next_start
+                else:
+                    later = tick + timeline.resolution
             span = max(1, min(timeline.resolution // 4, max(1, (later - start_tick) // 2)))
             end_tick = start_tick + span
+            if next_start is not None and end_tick > next_start > start_tick:
+                end_tick = next_start
             carry = end_tick
         else:
             end_tick = next_tick

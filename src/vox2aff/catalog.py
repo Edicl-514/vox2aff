@@ -46,6 +46,37 @@ GENRE_BITS = (
 INFINITE_NAMES = {2: "INF", 3: "GRV", 4: "HVN", 5: "VVD", 6: "XCD", 7: "NBL"}
 DIFFICULTY_NAMES = ("NOV", "ADV", "EXH", "INF", "MXM")
 
+# music_db stores letters the arcade font lacks as rare kanji.
+_DB_CHARACTERS = str.maketrans(
+    {
+        "\u203e": "~",
+        "\u49fa": "ê",
+        "\u5f5c": "ū",
+        "\u66e6": "à",
+        "\u66e9": "è",
+        "\u8e94": "🐾",
+        "\u9a2b": "á",
+        "\u9a69": "Ø",
+        "\u9a6b": "ā",
+        "\u9a6a": "ō",
+        "\u9aad": "ü",
+        "\u9b2f": "ī",
+        "\u9ef7": "ē",
+        "\u9f63": "Ú",
+        "\u9f67": "Ä",
+        "\u973b": "♠",
+        "\u9f6a": "♣",
+        "\u9448": "♦",
+        "\u9f72": "♥",
+        "\u9f76": "♡",
+        "\u9f77": "é",
+    }
+)
+
+
+def restore_db_text(value: str) -> str:
+    return value.translate(_DB_CHARACTERS)
+
 
 @dataclass
 class Difficulty:
@@ -175,8 +206,8 @@ def _song_from_element(music: ET.Element, folders: dict[str, Path]) -> Song:
     release_date = ""
     if info is not None:
         ascii_name = (info.findtext("ascii") or "").strip()
-        title = info.findtext("title_name") or music_id
-        artist = info.findtext("artist_name") or ""
+        title = restore_db_text(info.findtext("title_name") or music_id)
+        artist = restore_db_text(info.findtext("artist_name") or "")
         bpm_min = _int_text(info.findtext("bpm_min"))
         bpm_max = _int_text(info.findtext("bpm_max"))
         version = _int_text(info.findtext("version"))
@@ -227,8 +258,8 @@ def _difficulties(node: ET.Element | None) -> dict[int, Difficulty]:
         found[index] = Difficulty(
             index=index,
             level=_format_level(level_node.findtext("difnum")),
-            illustrator=(level_node.findtext("illustrator") or "").strip(),
-            effector=(level_node.findtext("effected_by") or "").strip(),
+            illustrator=restore_db_text((level_node.findtext("illustrator") or "").strip()),
+            effector=restore_db_text((level_node.findtext("effected_by") or "").strip()),
             kind=name,
         )
     return found

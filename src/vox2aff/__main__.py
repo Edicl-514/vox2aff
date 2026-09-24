@@ -10,7 +10,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from vox2aff.catalog import LEVEL_TO_INDEX, SUFFIX_INDEX
+from vox2aff.catalog import LEVEL_TO_INDEX, SUFFIX_INDEX, restore_db_text
 from vox2aff.convert import convert_chart
 from vox2aff.vox import parse_vox, read_vox_text
 
@@ -112,13 +112,24 @@ def _copy_media(folder: Path, dest: Path) -> None:
     if jackets:
         shutil.copyfile(jackets[0], dest / "base.png")
         _run_ffmpeg(["-y", "-i", str(jackets[0]), str(dest / "base.jpg")])
-    audio = next(folder.glob("*.s3v"), None)
-    preview = {path.name for path in folder.glob("*_pre.s3v")}
-    full = [path for path in folder.glob("*.s3v") if path.name not in preview]
-    if full:
-        audio = full[0]
-    if audio is not None:
-        _run_ffmpeg(["-y", "-i", str(audio), "-vn", "-c:a", "libvorbis", "-q:a", "6", str(dest / "base.ogg")])
+    main: Path | None = None
+    for path in sorted(folder.glob("*.s3v")):
+        parts = path.stem.split("_")
+        if "pre" in parts:
+            continue
+        difficulty = DIFFICULTY.get(parts[-1])
+        if difficulty is not None:
+            _encode_audio(path, dest / f"{difficulty}.ogg")
+            continue
+        if parts[-1] == "fx" or main is not None:
+            continue
+        main = path
+    if main is not None:
+        _encode_audio(main, dest / "base.ogg")
+
+
+def _encode_audio(source: Path, dest: Path) -> None:
+    _run_ffmpeg(["-y", "-i", str(source), "-vn", "-c:a", "libvorbis", "-q:a", "6", str(dest)])
 
 
 def _run_ffmpeg(args: list[str]) -> None:
@@ -148,7 +159,10 @@ def _load_catalog(path: Path) -> dict[str, tuple[str, str, dict[int, str]]]:
             continue
         ascii_name = (info.findtext("ascii") or "").strip()
         music_id = music.get("id") or ""
-        key = f"{music_id}_{ascii_name}" if music_id and ascii_name else ascii_name
+        if music_id.isdigit() and ascii_name:
+            key = f"{int(music_id):04d}_{ascii_name}"
+        else:
+            key = ascii_name or music_id
         ratings: dict[int, str] = {}
         difficulty = music.find("difficulty")
         if difficulty is not None:
@@ -161,8 +175,8 @@ def _load_catalog(path: Path) -> dict[str, tuple[str, str, dict[int, str]]]:
                     value = int(level) / 10
                     ratings[index] = str(int(value)) if value.is_integer() else f"{value:.1f}"
         catalog[key] = (
-            info.findtext("title_name") or key,
-            info.findtext("artist_name") or "",
+            restore_db_text(info.findtext("title_name") or key),
+            restore_db_text(info.findtext("artist_name") or ""),
             ratings,
         )
     return catalog

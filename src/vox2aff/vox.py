@@ -40,6 +40,7 @@ class LaserPoint:
     cell: int
     position: float
     point: int
+    wide: bool = False
 
 
 @dataclass
@@ -134,6 +135,7 @@ def parse_vox(text: str) -> VoxChart:
                         cell,
                         _laser_position(parts[1]),
                         int(parts[2]),
+                        wide=len(parts) > 5 and parts[5] == "2",
                     )
                 )
             else:
@@ -158,17 +160,18 @@ def parse_vox(text: str) -> VoxChart:
 @dataclass
 class Timeline:
     resolution: int
-    measure_start: dict[int, int]
-    meter_at: list[tuple[int, int]]
-    bpm_at: list[tuple[int, float]]
-    stopped_ticks: set[int] = field(default_factory=set)
+    measure_start: dict[int, float]
+    beat_len: dict[int, float]
+    meter_at: list[tuple[float, float]]
+    bpm_at: list[tuple[float, float]]
+    stopped_ticks: set[float] = field(default_factory=set)
 
-    def tick(self, measure: int, beat: int, cell: int) -> int:
+    def tick(self, measure: int, beat: int, cell: int) -> float:
         if measure not in self.measure_start:
             raise ValueError(f"measure {measure} is outside the chart")
-        return self.measure_start[measure] + (beat - 1) * self.resolution + cell
+        return self.measure_start[measure] + (beat - 1) * self.beat_len[measure] + cell
 
-    def ms(self, tick: int) -> int:
+    def ms(self, tick: float) -> int:
         cursor = 0
         bpm = self.bpm_at[0][1]
         elapsed = 0.0
@@ -183,7 +186,7 @@ class Timeline:
             elapsed += (tick - cursor) * 60_000.0 / (bpm * self.resolution)
         return int(round(elapsed))
 
-    def bpm_on(self, tick: int) -> float:
+    def bpm_on(self, tick: float) -> float:
         bpm = self.bpm_at[0][1]
         for at, new_bpm in self.bpm_at:
             if at > tick:
@@ -191,12 +194,12 @@ class Timeline:
             bpm = new_bpm
         return bpm
 
-    def meter_on(self, tick: int) -> int:
+    def meter_on(self, tick: float) -> float:
         meter = self.meter_at[0][1]
-        for at, numerator in self.meter_at:
+        for at, beats in self.meter_at:
             if at > tick:
                 break
-            meter = numerator
+            meter = beats
         return meter
 
 
@@ -208,21 +211,30 @@ def build_timeline(chart: VoxChart) -> Timeline:
         + [point.measure for point in chart.lasers]
         + [chart.end_measure]
     )
-    meter_changes = {sig.measure: sig.numerator for sig in chart.time_sigs}
+    sigs = {sig.measure: sig for sig in chart.time_sigs}
     numerator = 4
-    measure_start: dict[int, int] = {}
-    meter_at: list[tuple[int, int]] = []
-    cursor = 0
+    denominator = 4
+    measure_start: dict[int, float] = {}
+    beat_len: dict[int, float] = {}
+    meter_at: list[tuple[float, float]] = []
+    cursor = 0.0
+    if 1 not in sigs:
+        meter_at.append((0.0, 4.0))
     for measure in range(1, last_measure + 2):
-        if measure in meter_changes:
-            numerator = meter_changes[measure]
-            meter_at.append((cursor, numerator))
+        if measure in sigs:
+            numerator = sigs[measure].numerator
+            denominator = sigs[measure].denominator
+            beat_ticks = chart.resolution * 4 / denominator
+            meter_at.append((cursor, numerator * 4 / denominator))
+        else:
+            beat_ticks = chart.resolution * 4 / denominator
         measure_start[measure] = cursor
-        cursor += numerator * chart.resolution
+        beat_len[measure] = beat_ticks
+        cursor += numerator * beat_ticks
 
-    timeline = Timeline(chart.resolution, measure_start, meter_at, [])
-    bpm_at: list[tuple[int, float]] = []
-    stopped: set[int] = set()
+    timeline = Timeline(chart.resolution, measure_start, beat_len, meter_at, [])
+    bpm_at: list[tuple[float, float]] = []
+    stopped: set[float] = set()
     for event in chart.bpms:
         tick = timeline.tick(event.measure, event.beat, event.cell)
         bpm_at.append((tick, event.bpm))

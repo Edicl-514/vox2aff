@@ -234,6 +234,7 @@ class MainWindow(QMainWindow):
         self.songs: list[Song] = []
         self._thread: QThread | None = None
         self._worker: ConvertWorker | None = None
+        self._converting_name = ""
 
         self.model = SongListModel()
         self.proxy = SongProxy()
@@ -480,6 +481,7 @@ class MainWindow(QMainWindow):
         self.proxy.local_only = self.local_only.isChecked()
         self.proxy.endFilterChange()
         self.proxy.sort_key = self.sort_box.currentData() or "id"
+        self.proxy.invalidate()
         self.proxy.sort(0, Qt.SortOrder.AscendingOrder)
         shown = self.proxy.rowCount()
         total = len(self.songs)
@@ -621,6 +623,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "转换铺面", "请先选择歌曲和铺面输出文件夹")
             return
         dest = self.output_dir / song.output_name
+        self._converting_name = song.output_name
         self.log.setPlainText(f"开始转换 {song.label}\n→ {dest}")
         self.status_label.setText(f"正在转换 {song.output_name}")
         thread = QThread(self)
@@ -629,9 +632,11 @@ class MainWindow(QMainWindow):
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_converted)
         worker.failed.connect(self._on_convert_failed)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
+        worker.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+        worker.failed.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         thread.finished.connect(self._on_thread_finished)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
         self._refresh_convert_button()
@@ -640,9 +645,7 @@ class MainWindow(QMainWindow):
     def _on_converted(self, log: str) -> None:
         if log:
             self.log.appendPlainText(log)
-        song = self._current_song()
-        name = song.output_name if song is not None else ""
-        self.status_label.setText(f"转换完成：{name}")
+        self.status_label.setText(f"转换完成：{self._converting_name}")
 
     def _on_convert_failed(self, message: str) -> None:
         self.log.appendPlainText(message)
@@ -653,6 +656,12 @@ class MainWindow(QMainWindow):
         self._thread = None
         self._worker = None
         self._refresh_convert_button()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        thread = self._thread
+        if thread is not None and thread.isRunning():
+            thread.wait()
+        super().closeEvent(event)
 
 
 def main() -> int:
