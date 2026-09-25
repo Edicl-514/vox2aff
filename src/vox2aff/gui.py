@@ -6,6 +6,7 @@ import contextlib
 import io
 import random
 import sys
+import threading
 import traceback
 from pathlib import Path
 
@@ -17,12 +18,10 @@ if str(_src) not in sys.path:
 from PySide6.QtCore import (
     QAbstractListModel,
     QModelIndex,
-    QObject,
     QPersistentModelIndex,
     QSettings,
     QSortFilterProxyModel,
     Qt,
-    QThread,
     Signal,
 )
 from PySide6.QtGui import QPixmap
@@ -225,51 +224,11 @@ def _stored_bool(value: object) -> bool:
     return False
 
 
-class ConvertWorker(QObject):
-    finished = Signal(str)
-    failed = Signal(str)
-
-    def run_job(
-        self,
-        song: Song,
-        jobs: list[tuple[Path, bool]],
-        laser_epsilon: float,
-        straight_laser: str,
-        jacket_diff: bool,
-        arrange: str,
-        seed: int,
-    ) -> None:
-        folder = song.folder
-        if folder is None:
-            self.failed.emit("这首歌没有谱面文件夹")
-            return
-        catalog = {
-            folder.name: (song.title, song.artist, song.rating_map()),
-        }
-        buffer = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-                for dest, six_key in jobs:
-                    _convert_song(
-                        folder,
-                        dest,
-                        catalog,
-                        media=True,
-                        laser_epsilon=laser_epsilon,
-                        straight_laser=straight_laser,
-                        jacket_diff=jacket_diff,
-                        six_key=six_key,
-                        arrange=arrange,
-                        seed=seed,
-                    )
-        except Exception:
-            self.failed.emit(buffer.getvalue() + traceback.format_exc())
-            return
-        self.finished.emit(buffer.getvalue().strip())
-
-
 class MainWindow(QMainWindow):
-    convert_requested = Signal(object, object, float, str, bool, str, int)
+    songs_ready = Signal(int, object, object)
+    songs_failed = Signal(int, bool, str)
+    convert_finished = Signal(str)
+    convert_failed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -279,10 +238,13 @@ class MainWindow(QMainWindow):
         self.data_dir: Path | None = None
         self.output_dir: Path | None = None
         self.songs: list[Song] = []
-        self._thread: QThread | None = None
-        self._worker: ConvertWorker | None = None
+        self._load_generation = 0
         self._converting = False
         self._converting_name = ""
+        self.songs_ready.connect(self._on_songs_ready, Qt.ConnectionType.QueuedConnection)
+        self.songs_failed.connect(self._on_songs_failed, Qt.ConnectionType.QueuedConnection)
+        self.convert_finished.connect(self._on_converted, Qt.ConnectionType.QueuedConnection)
+        self.convert_failed.connect(self._on_convert_failed, Qt.ConnectionType.QueuedConnection)
 
         self.model = SongListModel()
         self.proxy = SongProxy()
@@ -547,7 +509,7 @@ class MainWindow(QMainWindow):
         data = self.settings.value("data_dir", "")
         output = self.settings.value("output_dir", "")
         if isinstance(data, str) and data:
-            self._set_data_dir(Path(data), quiet=True)
+            self._start_song_load(Path(data), quiet=True)
         if isinstance(output, str) and output:
             self.output_dir = Path(output)
             self.output_edit.setText(output)
@@ -580,8 +542,8 @@ class MainWindow(QMainWindow):
             return
         path = Path(chosen)
         if kind == "data":
-            self._set_data_dir(path, quiet=False)
             self.settings.setValue("data_dir", str(path))
+            self._start_song_load(path, quiet=False)
         else:
             self.output_dir = path
             self.output_edit.setText(str(path))
@@ -589,13 +551,28 @@ class MainWindow(QMainWindow):
             self._show_song(self._current_song())
             self._refresh_convert_button()
 
-    def _set_data_dir(self, path: Path, quiet: bool) -> None:
+    def _start_song_load(self, path: Path, quiet: bool) -> None:
+        self._load_generation += 1
+        generation = self._load_generation
+        self.data_edit.setText(str(path))
+        self.status_label.setText("正在读取曲库…")
+        threading.Thread(
+            target=self._load_songs_thread,
+            args=(generation, path, quiet),
+            name="sdvx-song-load",
+            daemon=True,
+        ).start()
+
+    def _load_songs_thread(self, generation: int, path: Path, quiet: bool) -> None:
         try:
             songs = load_songs(path)
         except Exception as exc:
-            if not quiet:
-                QMessageBox.warning(self, "无法读取 data 文件夹", str(exc))
-            self.status_label.setText(str(exc))
+            self.songs_failed.emit(generation, quiet, str(exc))
+            return
+        self.songs_ready.emit(generation, path, songs)
+
+    def _on_songs_ready(self, generation: int, path: Path, songs: list[Song]) -> None:
+        if generation != self._load_generation:
             return
         self.data_dir = path
         self.data_edit.setText(str(path))
@@ -608,6 +585,17 @@ class MainWindow(QMainWindow):
         self.model.set_songs(songs)
         self._apply_filter()
         self.status_label.setText(f"已加载 {len(songs)} 首歌曲")
+
+    def _on_songs_failed(self, generation: int, quiet: bool, message: str) -> None:
+        if generation != self._load_generation:
+            return
+        if self.data_dir is not None:
+            self.data_edit.setText(str(self.data_dir))
+        else:
+            self.data_edit.clear()
+        self.status_label.setText(message)
+        if not quiet:
+            QMessageBox.warning(self, "无法读取 data 文件夹", message)
 
     def _apply_filter(self) -> None:
         self.proxy.beginFilterChange()
@@ -849,24 +837,51 @@ class MainWindow(QMainWindow):
             f"配置 {arrange}\nseed {seed}"
         )
         self.status_label.setText(f"正在转换 {self._converting_name}")
-        self._ensure_thread()
         self._refresh_convert_button()
-        self.convert_requested.emit(
-            song, jobs, laser_epsilon(strength), straight, jacket_diff, arrange, seed
-        )
+        threading.Thread(
+            target=self._convert_thread,
+            args=(song, jobs, laser_epsilon(strength), straight, jacket_diff, arrange, seed),
+            name="sdvx-convert",
+            daemon=True,
+        ).start()
 
-    def _ensure_thread(self) -> None:
-        if self._thread is not None:
+    def _convert_thread(
+        self,
+        song: Song,
+        jobs: list[tuple[Path, bool]],
+        laser_epsilon: float,
+        straight_laser: str,
+        jacket_diff: bool,
+        arrange: str,
+        seed: int,
+    ) -> None:
+        folder = song.folder
+        if folder is None:
+            self.convert_failed.emit("这首歌没有谱面文件夹")
             return
-        thread = QThread(self)
-        worker = ConvertWorker()
-        worker.moveToThread(thread)
-        self.convert_requested.connect(worker.run_job)
-        worker.finished.connect(self._on_converted)
-        worker.failed.connect(self._on_convert_failed)
-        thread.start()
-        self._thread = thread
-        self._worker = worker
+        catalog = {
+            folder.name: (song.title, song.artist, song.rating_map()),
+        }
+        buffer = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                for dest, six_key in jobs:
+                    _convert_song(
+                        folder,
+                        dest,
+                        catalog,
+                        media=True,
+                        laser_epsilon=laser_epsilon,
+                        straight_laser=straight_laser,
+                        jacket_diff=jacket_diff,
+                        six_key=six_key,
+                        arrange=arrange,
+                        seed=seed,
+                    )
+        except Exception:
+            self.convert_failed.emit(buffer.getvalue() + traceback.format_exc())
+            return
+        self.convert_finished.emit(buffer.getvalue().strip())
 
     def _on_converted(self, log: str) -> None:
         if log:
@@ -881,14 +896,6 @@ class MainWindow(QMainWindow):
         self._converting = False
         self._refresh_convert_button()
         QMessageBox.critical(self, "转换失败", message[-1200:])
-
-    def closeEvent(self, event) -> None:  # noqa: N802
-        thread = self._thread
-        if thread is not None:
-            thread.quit()
-            thread.wait()
-        super().closeEvent(event)
-
 
 def main() -> int:
     app = QApplication(sys.argv)
