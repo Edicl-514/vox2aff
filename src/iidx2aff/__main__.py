@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from iidx2aff.arrange import MODES, apply_arrange, arrange_suffix, normalize_arrange
 from iidx2aff.audio import mix_song, sample_count
 from iidx2aff.convert import convert_chart
 from iidx2aff.iidx import SP_HARD_TO_EASY, SP_NAMES, read_charts
@@ -25,7 +27,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--movies", type=Path, default=None)
     parser.add_argument("--thumbs", type=Path, default=None)
     parser.add_argument("--no-media", action="store_true")
+    parser.add_argument(
+        "--arrange",
+        choices=MODES,
+        default="off",
+        help="lane option: mirror, random, r-random, or s-random. Scratch stays put",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="random seed for random, r-random, and s-random")
     args = parser.parse_args(argv)
+    arrange = normalize_arrange(args.arrange)
 
     songs = _chart_files(args.source)
     if not songs:
@@ -41,9 +51,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"skip {path}: not a chart file", file=sys.stderr)
             continue
         title, artist = catalog.get(song_id, (song_id, ""))
-        sounds = _write_song(path, charts, args.output / song_id, title, artist)
+        dest = args.output / f"{song_id}{arrange_suffix(arrange)}"
+        sounds = _write_song(path, charts, dest, title, artist, arrange=arrange, seed=args.seed)
         if not args.no_media:
-            _copy_media(song_id, path.parent, args.output / song_id, args.thumbs, sounds)
+            _copy_media(song_id, path.parent, dest, args.thumbs, sounds)
     return 0
 
 
@@ -56,13 +67,18 @@ def _write_song(
     ratings: dict[int, str] | None = None,
     slots: list[int] | None = None,
     side: str = "1p",
+    arrange: str = "off",
+    seed: int | None = None,
 ) -> list:
     by_slot = {index: chart for index, chart in charts}
     ordered = _export_slots(by_slot, slots)
     written: list[tuple[int, float, str]] = []
     used: list[int] = []
     for difficulty, slot in enumerate(ordered):
-        aff = convert_chart(by_slot[slot], side)
+        rng = random.Random(None if seed is None else f"{seed}:{slot}")
+        chart, detail = apply_arrange(by_slot[slot], arrange, rng)
+        print(detail)
+        aff = convert_chart(chart, side)
         if not aff.taps and not aff.holds and not aff.arcs:
             continue
         dest.mkdir(parents=True, exist_ok=True)

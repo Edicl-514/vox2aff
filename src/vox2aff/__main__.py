@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import random
 import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from vox2aff.arrange import MODES, apply_arrange, normalize_arrange
 from vox2aff.catalog import (
     LEVEL_TO_INDEX,
     SUFFIX_INDEX,
@@ -80,12 +82,23 @@ def main(argv: list[str] | None = None) -> int:
         dest="six_key",
         help="map BT 1–4 to Arcaea lanes 1/3/4/6 and FX to lanes 2/5, and widen lasers. Song folders get a _6k suffix",
     )
+    parser.add_argument(
+        "--arrange",
+        choices=MODES,
+        default="off",
+        help="lane option: mirror, random, random-mirror, or s-random. Off keeps the chart",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="random seed for random and s-random")
     args = parser.parse_args(argv)
+    arrange = normalize_arrange(args.arrange)
     epsilon = laser_epsilon(args.laser_strength)
     straight = straight_laser_mode(args.straight_laser)
     source: Path = args.source
     if source.is_file():
-        chart = convert_chart(parse_vox(read_vox_text(source)), epsilon, straight, args.six_key)
+        rng = random.Random(args.seed)
+        vox, detail = apply_arrange(parse_vox(read_vox_text(source)), arrange, rng)
+        print(detail)
+        chart = convert_chart(vox, epsilon, straight, args.six_key)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(chart.dumps(), encoding="utf-8")
         print(args.output)
@@ -100,13 +113,15 @@ def main(argv: list[str] | None = None) -> int:
     for folder in songs:
         _convert_song(
             folder,
-            args.output / project_folder_name(folder.name, args.six_key),
+            args.output / project_folder_name(folder.name, args.six_key, arrange),
             catalog,
             media=not args.no_media,
             laser_epsilon=epsilon,
             straight_laser=straight,
             jacket_diff=args.jacket_diff,
             six_key=args.six_key,
+            arrange=arrange,
+            seed=args.seed,
         )
     return 0
 
@@ -126,6 +141,8 @@ def _convert_song(
     straight_laser: str = DEFAULT_STRAIGHT_LASER,
     jacket_diff: bool = True,
     six_key: bool = False,
+    arrange: str = "off",
+    seed: int | None = None,
 ) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     info = catalog.get(folder.name)
@@ -141,6 +158,9 @@ def _convert_song(
             continue
         text = read_vox_text(vox_path)
         vox = parse_vox(text)
+        rng = random.Random(None if seed is None else f"{seed}:{difficulty}")
+        vox, detail = apply_arrange(vox, arrange, rng)
+        print(detail)
         aff = convert_chart(vox, laser_epsilon, straight_laser, six_key)
         (dest / f"{difficulty}.aff").write_text(aff.dumps(), encoding="utf-8")
         bpm = vox.bpms[0].bpm

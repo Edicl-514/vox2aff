@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import random
 import sys
 import traceback
 from pathlib import Path
@@ -52,6 +53,7 @@ from PySide6.QtWidgets import (
 )
 
 from vox2aff.__main__ import _convert_song
+from vox2aff.arrange import MODES
 from vox2aff.convert import DEFAULT_LASER_STRENGTH, DEFAULT_STRAIGHT_LASER, laser_epsilon
 from vox2aff.catalog import (
     GENRE_BITS,
@@ -234,6 +236,8 @@ class ConvertWorker(QObject):
         laser_epsilon: float,
         straight_laser: str,
         jacket_diff: bool,
+        arrange: str,
+        seed: int,
     ) -> None:
         folder = song.folder
         if folder is None:
@@ -255,6 +259,8 @@ class ConvertWorker(QObject):
                         straight_laser=straight_laser,
                         jacket_diff=jacket_diff,
                         six_key=six_key,
+                        arrange=arrange,
+                        seed=seed,
                     )
         except Exception:
             self.failed.emit(buffer.getvalue() + traceback.format_exc())
@@ -263,7 +269,7 @@ class ConvertWorker(QObject):
 
 
 class MainWindow(QMainWindow):
-    convert_requested = Signal(object, object, float, str, bool)
+    convert_requested = Signal(object, object, float, str, bool, str, int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -501,6 +507,24 @@ class MainWindow(QMainWindow):
         keys.addStretch(1)
         layout.addLayout(keys)
 
+        arrange = QHBoxLayout()
+        arrange.addWidget(QLabel("配置"))
+        self.arrange_box = QComboBox()
+        self.arrange_box.addItem("关闭", "off")
+        self.arrange_box.addItem("MIRROR", "mirror")
+        self.arrange_box.addItem("RANDOM", "random")
+        self.arrange_box.addItem("RANDOM+MIRROR", "random-mirror")
+        self.arrange_box.addItem("S-RANDOM", "s-random")
+        self.arrange_box.setToolTip(
+            "MIRROR 左右翻转，激光也对调并反向。"
+            "RANDOM 只在 BT 之间、FX 之间打乱，激光不动。"
+            "S-RANDOM 每个按键单独换列，白键可以落到 FX，激光按段重抽。"
+            "200 BPM 及以上时，16 分及更密的音符不会叠在同一列"
+        )
+        self.arrange_box.currentIndexChanged.connect(self._on_arrange)
+        arrange.addWidget(self.arrange_box, 1)
+        layout.addLayout(arrange)
+
         actions = QHBoxLayout()
         self.convert_button = QPushButton("转换铺面")
         self.convert_button.setObjectName("convert")
@@ -542,6 +566,9 @@ class MainWindow(QMainWindow):
         four_key = not six_key if stored_four is None else _stored_bool(stored_four)
         self.four_key.setChecked(four_key)
         self.six_key.setChecked(six_key)
+        stored_arrange = self.settings.value("arrange", "off")
+        arrange_index = self.arrange_box.findData(str(stored_arrange))
+        self.arrange_box.setCurrentIndex(arrange_index if arrange_index >= 0 else 0)
         self._refresh_convert_button()
 
     def _browse(self, kind: str) -> None:
@@ -735,8 +762,24 @@ class MainWindow(QMainWindow):
             modes.append(True)
         return modes
 
+    def _selected_arrange(self) -> str:
+        mode = self.arrange_box.currentData()
+        if not isinstance(mode, str) or mode not in MODES:
+            return "off"
+        return mode
+
     def _project_names(self, song: Song) -> list[str]:
-        return [project_folder_name(song.output_name, six_key) for six_key in self._selected_modes()]
+        arrange = self._selected_arrange()
+        return [project_folder_name(song.output_name, six_key, arrange) for six_key in self._selected_modes()]
+
+    def _on_arrange(self) -> None:
+        self.settings.setValue("arrange", self._selected_arrange())
+        song = self._current_song()
+        if song is None:
+            return
+        self._show_output_names(song)
+        if song.folder is not None and song.charts:
+            self.note_label.setText(self._output_note(song))
 
     def _output_note(self, song: Song) -> str:
         names = self._project_names(song)
@@ -784,8 +827,10 @@ class MainWindow(QMainWindow):
         if not modes:
             QMessageBox.information(self, "转换铺面", "请至少勾选 4K 或 6K")
             return
+        arrange = self._selected_arrange()
         jobs = [
-            (self.output_dir / project_folder_name(song.output_name, six_key), six_key) for six_key in modes
+            (self.output_dir / project_folder_name(song.output_name, six_key, arrange), six_key)
+            for six_key in modes
         ]
         self._converting_name = "、".join(dest.name for dest, _six_key in jobs)
         self._converting = True
@@ -794,17 +839,21 @@ class MainWindow(QMainWindow):
         if not isinstance(straight, str):
             straight = DEFAULT_STRAIGHT_LASER
         jacket_diff = self.jacket_diff.isChecked()
+        seed = random.SystemRandom().randrange(1, 2**31)
         targets = "\n".join(f"→ {dest}" for dest, _six_key in jobs)
         self.log.setPlainText(
             f"开始转换 {song.label}\n{targets}\n物量抑制 {strength}\n直线激光 {straight}\n"
             f"曲绘差分 {'开' if jacket_diff else '关'}\n"
             f"4K {'开' if False in modes else '关'}\n"
-            f"6K {'开' if True in modes else '关'}"
+            f"6K {'开' if True in modes else '关'}\n"
+            f"配置 {arrange}\nseed {seed}"
         )
         self.status_label.setText(f"正在转换 {self._converting_name}")
         self._ensure_thread()
         self._refresh_convert_button()
-        self.convert_requested.emit(song, jobs, laser_epsilon(strength), straight, jacket_diff)
+        self.convert_requested.emit(
+            song, jobs, laser_epsilon(strength), straight, jacket_diff, arrange, seed
+        )
 
     def _ensure_thread(self) -> None:
         if self._thread is not None:

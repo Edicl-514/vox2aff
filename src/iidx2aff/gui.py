@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import random
 import shutil
 import sys
 import tempfile
@@ -53,6 +54,7 @@ from PySide6.QtWidgets import (
 )
 
 from iidx2aff.__main__ import DIFFICULTY_COUNT, _copy_media, _write_song
+from iidx2aff.arrange import MODES, arrange_suffix
 from iidx2aff.catalog import Song, format_bpm, load_songs, version_text
 from iidx2aff.iidx import SP_HARD_TO_EASY, SP_NAMES, read_charts
 from iidx2aff.ifs import extract
@@ -213,7 +215,16 @@ class ConvertWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
 
-    def run_job(self, song: Song, dest: Path, thumbs: Path | None, slots: list[int], side: str) -> None:
+    def run_job(
+        self,
+        song: Song,
+        dest: Path,
+        thumbs: Path | None,
+        slots: list[int],
+        side: str,
+        arrange: str,
+        seed: int,
+    ) -> None:
         if not song.has_chart:
             self.failed.emit("这首歌没有谱面文件")
             return
@@ -226,7 +237,18 @@ class ConvertWorker(QObject):
             with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
                 source, chart, scratch = _song_files(song)
                 charts = read_charts(chart.read_bytes())
-                sounds = _write_song(chart, charts, dest, song.title, song.artist, song.rating_map(), slots, side)
+                sounds = _write_song(
+                    chart,
+                    charts,
+                    dest,
+                    song.title,
+                    song.artist,
+                    song.rating_map(),
+                    slots,
+                    side,
+                    arrange,
+                    seed,
+                )
                 _copy_media(song.folder_id, source, dest, thumbs, sounds)
         except Exception:
             self.failed.emit(buffer.getvalue() + traceback.format_exc())
@@ -238,7 +260,7 @@ class ConvertWorker(QObject):
 
 
 class MainWindow(QMainWindow):
-    convert_requested = Signal(object, object, object, object, object)
+    convert_requested = Signal(object, object, object, object, object, object, object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -452,6 +474,25 @@ class MainWindow(QMainWindow):
         side_row.addWidget(self.side_box, 1)
         layout.addLayout(side_row)
 
+        arrange_row = QHBoxLayout()
+        arrange_row.addWidget(QLabel("配置"))
+        self.arrange_box = QComboBox()
+        self.arrange_box.addItem("关闭", "off")
+        self.arrange_box.addItem("MIRROR", "mirror")
+        self.arrange_box.addItem("R-RANDOM", "r-random")
+        self.arrange_box.addItem("RANDOM", "random")
+        self.arrange_box.addItem("S-RANDOM", "s-random")
+        self.arrange_box.setToolTip(
+            "只改 1–7 键，盘子不动。"
+            "MIRROR 左右对调。"
+            "R-RANDOM 在 12 种旋转里抽，不会抽到正规或纯镜像。"
+            "RANDOM 整列打乱。"
+            "S-RANDOM 每个音符单独换列"
+        )
+        self.arrange_box.currentIndexChanged.connect(self._on_arrange)
+        arrange_row.addWidget(self.arrange_box, 1)
+        layout.addLayout(arrange_row)
+
         actions = QHBoxLayout()
         self.convert_button = QPushButton("转换铺面")
         self.convert_button.setObjectName("convert")
@@ -481,6 +522,9 @@ class MainWindow(QMainWindow):
         stored_side = self.settings.value("side", "1p")
         side_index = self.side_box.findData(str(stored_side))
         self.side_box.setCurrentIndex(side_index if side_index >= 0 else 0)
+        stored_arrange = self.settings.value("arrange", "off")
+        arrange_index = self.arrange_box.findData(str(stored_arrange))
+        self.arrange_box.setCurrentIndex(arrange_index if arrange_index >= 0 else 0)
         self._refresh_convert_button()
 
     def _browse(self, kind: str) -> None:
@@ -694,13 +738,18 @@ class MainWindow(QMainWindow):
             self.note_label.setText("请至少勾选一个 SP 难度")
             return
         files = "、".join(f"{index}.aff" for index in range(len(names)))
-        self.note_label.setText(f"输出 {song.output_name}：" + "、".join(names) + f" → {files}")
+        folder = song.output_name + arrange_suffix(self._selected_arrange())
+        self.note_label.setText(f"输出 {folder}：" + "、".join(names) + f" → {files}")
+
+    def _output_folder(self, song: Song) -> str:
+        return song.output_name + arrange_suffix(self._selected_arrange())
 
     def _show_output(self, song: Song) -> None:
+        name = self._output_folder(song)
         if self.output_dir is None:
-            self.output_label.setText(song.output_name)
+            self.output_label.setText(name)
         else:
-            self.output_label.setText(str(self.output_dir / song.output_name))
+            self.output_label.setText(str(self.output_dir / name))
 
     def _set_cover(self, path: Path | None) -> None:
         if path is None or not path.is_file():
@@ -762,16 +811,20 @@ class MainWindow(QMainWindow):
         if not slots:
             QMessageBox.information(self, "转换铺面", "请至少勾选一个 SP 难度")
             return
-        dest = self.output_dir / song.output_name
+        arrange = self._selected_arrange()
+        dest = self.output_dir / self._output_folder(song)
         self._converting_name = dest.name
         self._converting = True
         names = "、".join(SP_NAMES[slot] for slot in slots)
         side = self._selected_side()
-        self.log.setPlainText(f"开始转换 {song.label}\n{side.upper()}\n{names}\n→ {dest}")
+        seed = random.SystemRandom().randrange(1, 2**31)
+        self.log.setPlainText(
+            f"开始转换 {song.label}\n{side.upper()}\n{names}\n配置 {arrange}\nseed {seed}\n→ {dest}"
+        )
         self.status_label.setText(f"正在转换 {self._converting_name}")
         self._ensure_thread()
         self._refresh_convert_button()
-        self.convert_requested.emit(song, dest, self._thumbs_dir(), slots, side)
+        self.convert_requested.emit(song, dest, self._thumbs_dir(), slots, side, arrange, seed)
 
     def _selected_side(self) -> str:
         side = self.side_box.currentData()
@@ -779,6 +832,21 @@ class MainWindow(QMainWindow):
 
     def _on_side(self) -> None:
         self.settings.setValue("side", self._selected_side())
+
+    def _selected_arrange(self) -> str:
+        mode = self.arrange_box.currentData()
+        if not isinstance(mode, str) or mode not in MODES:
+            return "off"
+        return mode
+
+    def _on_arrange(self) -> None:
+        self.settings.setValue("arrange", self._selected_arrange())
+        song = self._current_song()
+        if song is None:
+            return
+        self._show_output(song)
+        if song.has_chart:
+            self._show_selection_note(song)
 
     def _ensure_thread(self) -> None:
         if self._thread is not None:
