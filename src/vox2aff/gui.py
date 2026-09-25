@@ -61,6 +61,7 @@ from vox2aff.catalog import (
     format_date,
     genre_text,
     load_songs,
+    project_folder_name,
     version_text,
 )
 
@@ -229,7 +230,7 @@ class ConvertWorker(QObject):
     def run_job(
         self,
         song: Song,
-        dest: Path,
+        jobs: list[tuple[Path, bool]],
         laser_epsilon: float,
         straight_laser: str,
         jacket_diff: bool,
@@ -244,15 +245,17 @@ class ConvertWorker(QObject):
         buffer = io.StringIO()
         try:
             with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-                _convert_song(
-                    folder,
-                    dest,
-                    catalog,
-                    media=True,
-                    laser_epsilon=laser_epsilon,
-                    straight_laser=straight_laser,
-                    jacket_diff=jacket_diff,
-                )
+                for dest, six_key in jobs:
+                    _convert_song(
+                        folder,
+                        dest,
+                        catalog,
+                        media=True,
+                        laser_epsilon=laser_epsilon,
+                        straight_laser=straight_laser,
+                        jacket_diff=jacket_diff,
+                        six_key=six_key,
+                    )
         except Exception:
             self.failed.emit(buffer.getvalue() + traceback.format_exc())
             return
@@ -482,6 +485,22 @@ class MainWindow(QMainWindow):
         self.jacket_diff.toggled.connect(self._on_jacket_diff)
         layout.addWidget(self.jacket_diff)
 
+        keys = QHBoxLayout()
+        self.four_key = QCheckBox("4K 转铺")
+        self.four_key.setToolTip("BT 1–4 对应四条地面轨，FX 写成天空音符")
+        self.four_key.toggled.connect(self._on_key_mode)
+        self.six_key = QCheckBox("6K 转铺")
+        self.six_key.setToolTip(
+            "BT 1–4 对应从左数第 1、3、4、6 轨，FX 对应第 2、5 轨。"
+            "激光按六轨宽度向两侧展开，并写入 enwidenlanes / enwidencamera。"
+            "与 4K 同时勾选时，一次转换写出两个文件夹"
+        )
+        self.six_key.toggled.connect(self._on_key_mode)
+        keys.addWidget(self.four_key)
+        keys.addWidget(self.six_key)
+        keys.addStretch(1)
+        layout.addLayout(keys)
+
         actions = QHBoxLayout()
         self.convert_button = QPushButton("转换铺面")
         self.convert_button.setObjectName("convert")
@@ -518,6 +537,11 @@ class MainWindow(QMainWindow):
         straight_index = self.straight_box.findData(str(stored_straight))
         self.straight_box.setCurrentIndex(straight_index if straight_index >= 0 else 1)
         self.jacket_diff.setChecked(_stored_bool(self.settings.value("jacket_diff", True)))
+        six_key = _stored_bool(self.settings.value("six_key", False))
+        stored_four = self.settings.value("four_key")
+        four_key = not six_key if stored_four is None else _stored_bool(stored_four)
+        self.four_key.setChecked(four_key)
+        self.six_key.setChecked(six_key)
         self._refresh_convert_button()
 
     def _browse(self, kind: str) -> None:
@@ -621,10 +645,7 @@ class MainWindow(QMainWindow):
         self.version_label.setText(version_text(song.version) if song.version else "—")
         self.genre_label.setText(genre_text(song.genre))
         self.date_label.setText(format_date(song.release_date) or "—")
-        if self.output_dir is not None:
-            self.output_label.setText(str(self.output_dir / song.output_name))
-        else:
-            self.output_label.setText(song.output_name)
+        self._show_output_names(song)
 
         indexes = sorted(set(song.difficulties) | set(song.charts) | set(song.jackets))
         self.table.setRowCount(len(indexes))
@@ -655,7 +676,7 @@ class MainWindow(QMainWindow):
         elif not song.charts:
             self.note_label.setText("文件夹里没有 .vox 谱面")
         else:
-            self.note_label.setText(f"输出文件夹名：{song.output_name}")
+            self.note_label.setText(self._output_note(song))
         self._refresh_convert_button()
 
     def _on_difficulty_changed(self) -> None:
@@ -697,6 +718,7 @@ class MainWindow(QMainWindow):
             and song.folder is not None
             and bool(song.charts)
             and self.output_dir is not None
+            and self._selected_modes()
             and not busy
         )
         self.convert_button.setEnabled(ready)
@@ -704,6 +726,45 @@ class MainWindow(QMainWindow):
 
     def _on_jacket_diff(self, checked: bool) -> None:
         self.settings.setValue("jacket_diff", checked)
+
+    def _selected_modes(self) -> list[bool]:
+        modes: list[bool] = []
+        if self.four_key.isChecked():
+            modes.append(False)
+        if self.six_key.isChecked():
+            modes.append(True)
+        return modes
+
+    def _project_names(self, song: Song) -> list[str]:
+        return [project_folder_name(song.output_name, six_key) for six_key in self._selected_modes()]
+
+    def _output_note(self, song: Song) -> str:
+        names = self._project_names(song)
+        if not names:
+            return "请至少勾选 4K 或 6K"
+        return "输出文件夹名：" + "、".join(names)
+
+    def _show_output_names(self, song: Song) -> None:
+        names = self._project_names(song)
+        if not names:
+            text = "未选择 4K / 6K"
+        elif self.output_dir is not None:
+            text = "、".join(str(self.output_dir / name) for name in names)
+        else:
+            text = "、".join(names)
+        self.output_label.setText(text)
+
+    def _on_key_mode(self, checked: bool) -> None:
+        del checked
+        self.settings.setValue("four_key", self.four_key.isChecked())
+        self.settings.setValue("six_key", self.six_key.isChecked())
+        song = self._current_song()
+        if song is None:
+            return
+        self._show_output_names(song)
+        if song.folder is not None and song.charts:
+            self.note_label.setText(self._output_note(song))
+        self._refresh_convert_button()
 
     def _on_straight_laser(self) -> None:
         mode = self.straight_box.currentData()
@@ -719,22 +780,31 @@ class MainWindow(QMainWindow):
         if song is None or song.folder is None or self.output_dir is None:
             QMessageBox.information(self, "转换铺面", "请先选择歌曲和铺面输出文件夹")
             return
-        dest = self.output_dir / song.output_name
-        self._converting_name = song.output_name
+        modes = self._selected_modes()
+        if not modes:
+            QMessageBox.information(self, "转换铺面", "请至少勾选 4K 或 6K")
+            return
+        jobs = [
+            (self.output_dir / project_folder_name(song.output_name, six_key), six_key) for six_key in modes
+        ]
+        self._converting_name = "、".join(dest.name for dest, _six_key in jobs)
         self._converting = True
         strength = self.laser_slider.value()
         straight = self.straight_box.currentData()
         if not isinstance(straight, str):
             straight = DEFAULT_STRAIGHT_LASER
         jacket_diff = self.jacket_diff.isChecked()
+        targets = "\n".join(f"→ {dest}" for dest, _six_key in jobs)
         self.log.setPlainText(
-            f"开始转换 {song.label}\n→ {dest}\n物量抑制 {strength}\n直线激光 {straight}\n"
-            f"曲绘差分 {'开' if jacket_diff else '关'}"
+            f"开始转换 {song.label}\n{targets}\n物量抑制 {strength}\n直线激光 {straight}\n"
+            f"曲绘差分 {'开' if jacket_diff else '关'}\n"
+            f"4K {'开' if False in modes else '关'}\n"
+            f"6K {'开' if True in modes else '关'}"
         )
-        self.status_label.setText(f"正在转换 {song.output_name}")
+        self.status_label.setText(f"正在转换 {self._converting_name}")
         self._ensure_thread()
         self._refresh_convert_button()
-        self.convert_requested.emit(song, dest, laser_epsilon(strength), straight, jacket_diff)
+        self.convert_requested.emit(song, jobs, laser_epsilon(strength), straight, jacket_diff)
 
     def _ensure_thread(self) -> None:
         if self._thread is not None:

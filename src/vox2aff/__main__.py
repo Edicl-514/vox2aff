@@ -11,7 +11,13 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from vox2aff.catalog import LEVEL_TO_INDEX, SUFFIX_INDEX, difficulty_jackets, restore_db_text
+from vox2aff.catalog import (
+    LEVEL_TO_INDEX,
+    SUFFIX_INDEX,
+    difficulty_jackets,
+    project_folder_name,
+    restore_db_text,
+)
 from vox2aff.convert import (
     DEFAULT_LASER_STRENGTH,
     DEFAULT_STRAIGHT_LASER,
@@ -68,12 +74,18 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
         help="write per-difficulty jackets (0.jpg–4.jpg). On by default; base.jpg is always the highest difficulty jacket",
     )
+    parser.add_argument(
+        "--6k",
+        action="store_true",
+        dest="six_key",
+        help="map BT 1–4 to Arcaea lanes 1/3/4/6 and FX to lanes 2/5, and widen lasers. Song folders get a _6k suffix",
+    )
     args = parser.parse_args(argv)
     epsilon = laser_epsilon(args.laser_strength)
     straight = straight_laser_mode(args.straight_laser)
     source: Path = args.source
     if source.is_file():
-        chart = convert_chart(parse_vox(read_vox_text(source)), epsilon, straight)
+        chart = convert_chart(parse_vox(read_vox_text(source)), epsilon, straight, args.six_key)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(chart.dumps(), encoding="utf-8")
         print(args.output)
@@ -88,12 +100,13 @@ def main(argv: list[str] | None = None) -> int:
     for folder in songs:
         _convert_song(
             folder,
-            args.output / folder.name,
+            args.output / project_folder_name(folder.name, args.six_key),
             catalog,
             media=not args.no_media,
             laser_epsilon=epsilon,
             straight_laser=straight,
             jacket_diff=args.jacket_diff,
+            six_key=args.six_key,
         )
     return 0
 
@@ -112,6 +125,7 @@ def _convert_song(
     laser_epsilon: float = 0.0,
     straight_laser: str = DEFAULT_STRAIGHT_LASER,
     jacket_diff: bool = True,
+    six_key: bool = False,
 ) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     info = catalog.get(folder.name)
@@ -127,7 +141,7 @@ def _convert_song(
             continue
         text = read_vox_text(vox_path)
         vox = parse_vox(text)
-        aff = convert_chart(vox, laser_epsilon, straight_laser)
+        aff = convert_chart(vox, laser_epsilon, straight_laser, six_key)
         (dest / f"{difficulty}.aff").write_text(aff.dumps(), encoding="utf-8")
         bpm = vox.bpms[0].bpm
         if base_bpm == 0.0:

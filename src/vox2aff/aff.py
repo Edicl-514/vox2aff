@@ -55,12 +55,20 @@ class Arc:
 
 
 @dataclass
+class Scenecontrol:
+    time: int
+    kind: str
+    values: tuple[float, ...] = ()
+
+
+@dataclass
 class AffChart:
     audio_offset: int = 0
     timings: list[Timing] = field(default_factory=list)
     taps: list[Tap] = field(default_factory=list)
     holds: list[Hold] = field(default_factory=list)
     arcs: list[Arc] = field(default_factory=list)
+    scenecontrols: list[Scenecontrol] = field(default_factory=list)
 
     def dumps(self) -> str:
         lines = [f"AudioOffset:{self.audio_offset}", "-"]
@@ -73,6 +81,12 @@ class AffChart:
                     f"timing({timing.time},{timing.bpm:.2f},{timing.beats:.2f});",
                 )
             )
+        for control in self.scenecontrols:
+            values = ",".join(_scene_value(value) for value in control.values)
+            body = f"scenecontrol({control.time},{control.kind}"
+            if values:
+                body += f",{values}"
+            events.append((control.time, 4, body + ");"))
         for tap in self.taps:
             events.append((tap.time, 1, f"({tap.time},{tap.lane});"))
         for hold in self.holds:
@@ -94,6 +108,12 @@ class AffChart:
                 lines.append(_arc_text(arc))
             lines.append("};")
         return "\n".join(lines) + "\n"
+
+
+def _scene_value(value: float) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return f"{value:.2f}"
 
 
 def _arc_text(arc: Arc) -> str:

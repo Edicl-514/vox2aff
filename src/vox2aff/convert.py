@@ -10,10 +10,14 @@ the slam ends.
 
 from __future__ import annotations
 
-from vox2aff.aff import AffChart, Arc, ArcTap, Hold, Tap, Timing
+from vox2aff.aff import AffChart, Arc, ArcTap, Hold, Scenecontrol, Tap, Timing
 from vox2aff.vox import LaserPoint, Timeline, VoxChart, build_timeline
 
 BT_LANE = {3: 1, 4: 2, 5: 3, 6: 4}
+# 6K lanes in the file are 0–5 from left to right. BT 1–4 land on the 1st, 3rd,
+# 4th and 6th lanes; the two FX buttons take the 2nd and 5th.
+BT_LANE_6K = {3: 0, 4: 2, 5: 3, 6: 5}
+FX_LANE_6K = {2: 1, 7: 4}
 FX_TRACK = {2: 0, 7: 1}
 LASER_TRACK = {1: 0, 8: 1}
 FX_X = {0: 0.16, 1: 0.84}
@@ -44,12 +48,16 @@ def _clamp_x(value: float) -> float:
     return min(1.5, max(-0.5, value))
 
 
-def _laser_x(position: float, wide: bool) -> float:
+def _laser_x(position: float, wide: bool, six_key: bool = False) -> float:
     # A 2x laser stores the knob in 0–1, but the beam is twice as wide,
     # so the same reading covers -0.5 to 1.5.
     if wide:
         position = position * 2 - 0.5
-    return _clamp_x(position)
+    if not six_key:
+        return _clamp_x(position)
+    # Six lanes are 1.5× the four-lane width, one lane past each side.
+    position = 0.5 + (position - 0.5) * 1.5
+    return min(2.0, max(-1.0, position))
 
 
 def _positive_end(start: int, end: int) -> int:
@@ -60,13 +68,23 @@ def convert_chart(
     chart: VoxChart,
     laser_epsilon: float = 0.0,
     straight_laser: str = DEFAULT_STRAIGHT_LASER,
+    six_key: bool = False,
 ) -> AffChart:
     timeline = build_timeline(chart)
     aff = AffChart()
+    if six_key:
+        # Timing is before 0 so Arcade Plus already treats the chart as widened
+        # at time 0. The enable flag must be an int; a float is ignored.
+        aff.scenecontrols.extend(
+            (
+                Scenecontrol(-1, "enwidenlanes", (0.0, 1)),
+                Scenecontrol(-1, "enwidencamera", (0.0, 1)),
+            )
+        )
     _write_timing(aff, timeline, chart)
-    _write_buttons(aff, chart, timeline)
-    _write_lasers(aff, chart, timeline, laser_epsilon, straight_laser_mode(straight_laser))
-    _write_fx(aff, chart, timeline)
+    _write_buttons(aff, chart, timeline, six_key)
+    _write_lasers(aff, chart, timeline, laser_epsilon, straight_laser_mode(straight_laser), six_key)
+    _write_fx(aff, chart, timeline, six_key)
     return aff
 
 
@@ -88,9 +106,10 @@ def _write_timing(aff: AffChart, timeline: Timeline, chart: VoxChart) -> None:
         aff.timings.append(Timing(timeline.ms(tick), bpm, beats))
 
 
-def _write_buttons(aff: AffChart, chart: VoxChart, timeline: Timeline) -> None:
+def _write_buttons(aff: AffChart, chart: VoxChart, timeline: Timeline, six_key: bool = False) -> None:
+    lanes = BT_LANE_6K if six_key else BT_LANE
     for note in chart.buttons:
-        lane = BT_LANE.get(note.track)
+        lane = lanes.get(note.track)
         if lane is None:
             continue
         start = timeline.ms(timeline.tick(note.measure, note.beat, note.cell))
@@ -108,6 +127,7 @@ def _write_lasers(
     timeline: Timeline,
     laser_epsilon: float = 0.0,
     straight_laser: str = DEFAULT_STRAIGHT_LASER,
+    six_key: bool = False,
 ) -> list[Arc]:
     by_track: dict[int, list[LaserPoint]] = {1: [], 8: []}
     for point in chart.lasers:
@@ -124,7 +144,7 @@ def _write_lasers(
                 next_start = timeline.tick(nxt.measure, nxt.beat, nxt.cell)
             written.extend(
                 _segment_to_arcs(
-                    segment, color, timeline, aff, next_start, laser_epsilon, straight_laser
+                    segment, color, timeline, aff, next_start, laser_epsilon, straight_laser, six_key
                 )
             )
     return written
@@ -214,11 +234,15 @@ def _segment_to_arcs(
     next_start: float | None = None,
     laser_epsilon: float = 0.0,
     straight_laser: str = DEFAULT_STRAIGHT_LASER,
+    six_key: bool = False,
 ) -> list[Arc]:
     wide = segment[0].wide
     timed = _simplify_laser(
         [
-            (timeline.tick(point.measure, point.beat, point.cell), _laser_x(point.position, wide))
+            (
+                timeline.tick(point.measure, point.beat, point.cell),
+                _laser_x(point.position, wide, six_key),
+            )
             for point in segment
         ],
         laser_epsilon,
@@ -270,8 +294,12 @@ def _is_straight_laser(x_start: float, x_end: float) -> bool:
     return round(x_start, 2) == round(x_end, 2)
 
 
-def _write_fx(aff: AffChart, chart: VoxChart, timeline: Timeline) -> None:
+def _write_fx(aff: AffChart, chart: VoxChart, timeline: Timeline, six_key: bool = False) -> None:
+    if six_key:
+        _write_fx_lanes(aff, chart, timeline)
+        return
     chips: list[tuple[int, float]] = []
+    holds: list[tuple[int, int, float]] = []
     for note in chart.buttons:
         side = FX_TRACK.get(note.track)
         if side is None:
@@ -283,8 +311,41 @@ def _write_fx(aff: AffChart, chart: VoxChart, timeline: Timeline) -> None:
             chips.append((start, x))
             continue
         end = _positive_end(start, timeline.ms(start_tick + note.length))
+        holds.append((start, end, x))
+    for start, end, x in _merge_touching(holds):
         aff.arcs.append(Arc(start, end, x, x, y_start=FX_Y, y_end=FX_Y, color=FX_COLOR, is_void=False))
     for start, x in chips:
         host = Arc(start, start + 1, x, x, color=FX_COLOR, is_void=True)
         host.arc_taps.append(ArcTap(start))
         aff.arcs.append(host)
+
+
+def _write_fx_lanes(aff: AffChart, chart: VoxChart, timeline: Timeline) -> None:
+    taps: list[tuple[int, int]] = []
+    holds: list[tuple[int, int, int]] = []
+    for note in chart.buttons:
+        lane = FX_LANE_6K.get(note.track)
+        if lane is None:
+            continue
+        start = timeline.ms(timeline.tick(note.measure, note.beat, note.cell))
+        if note.length <= 0:
+            taps.append((start, lane))
+            continue
+        end_tick = timeline.tick(note.measure, note.beat, note.cell) + note.length
+        end = timeline.ms(end_tick)
+        holds.append((start, _positive_end(start, end), lane))
+    for start, lane in taps:
+        aff.taps.append(Tap(start, lane))
+    for start, end, lane in _merge_touching(holds):
+        aff.holds.append(Hold(start, end, lane))
+
+
+def _merge_touching(spans: list[tuple[int, int, float]]) -> list[tuple[int, int, float]]:
+    """Join FX holds that meet, so Arcade does not draw a new head at the joint."""
+    merged: list[tuple[int, int, float]] = []
+    for start, end, key in sorted(spans):
+        if merged and merged[-1][2] == key and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end), key)
+            continue
+        merged.append((start, end, key))
+    return merged

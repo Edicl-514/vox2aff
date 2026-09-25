@@ -154,6 +154,11 @@ class Song:
         return {index: item.level for index, item in self.difficulties.items() if item.level}
 
 
+def project_folder_name(name: str, six_key: bool = False) -> str:
+    """Song project folder. 6K charts get a suffix so they can sit beside 4K ones."""
+    return f"{name}_6k" if six_key else name
+
+
 def version_text(version: int) -> str:
     return VERSIONS.get(version, f"Version {version}")
 
