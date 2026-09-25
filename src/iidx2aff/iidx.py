@@ -35,6 +35,7 @@ class Sound:
     tick: int
     sample: int
     pan: int
+    bgm: bool = False
 
 
 @dataclass
@@ -99,7 +100,7 @@ def _read_chart(data: bytes, offset: int, length: int) -> IidxChart:
             if value:
                 holds.append((tick, tick + value, param))
         elif kind == 0x07 and value:
-            sounds.append(Sound(tick, value, param))
+            sounds.append(Sound(tick, value, param, True))
         elif kind == 0x04 and param:
             tempos.append(Tempo(tick, value / param))
         elif kind == 0x05 and param:

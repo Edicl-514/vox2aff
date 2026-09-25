@@ -103,8 +103,7 @@ def _write_song(
     arcade = dest / "Arcade"
     arcade.mkdir(exist_ok=True)
     (arcade / "Project.arcade").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    hardest = next(slot for slot in SP_HARD_TO_EASY if slot in used)
-    return by_slot[hardest].sounds
+    return [(difficulty, slot, by_slot[slot].sounds) for (difficulty, _, _), slot in zip(written, used)]
 
 
 def _export_slots(by_slot: dict[int, object], slots: list[int] | None) -> list[int]:
@@ -117,37 +116,116 @@ def _export_slots(by_slot: dict[int, object], slots: list[int] | None) -> list[i
     return [slot for slot in easy_to_hard if slot in chosen and slot in by_slot][:DIFFICULTY_COUNT]
 
 
-def _sound_pack(source: Path, sounds: list) -> Path | None:
-    """Keysound archive for this chart. Preview ``*_pre.2dx`` files are not songs."""
-    s3p = sorted(source.glob("*.s3p"))
-    if s3p:
-        return s3p[0]
-    needed = max((sound.sample for sound in sounds if sound.sample > 0), default=0)
-    packs: list[tuple[int, str, Path]] = []
-    for path in sorted(source.glob("*.2dx")):
-        if path.stem.endswith("_pre"):
-            continue
+def _song_packs(source: Path, song_id: str) -> list[tuple[Path, int]]:
+    """Non-preview banks in this folder, as ``(path, sample count)``.
+
+    A song can ship one bank per difficulty (``260111.s3p``, ``260112.s3p``,
+    ``260113.s3p``). ``button.s3p`` and other unrelated files are left out
+    when a bank name starts with the song id.
+    """
+    found: list[Path] = []
+    for pattern in ("*.s3p", "*.2dx"):
+        for path in sorted(source.glob(pattern)):
+            if path.stem.endswith("_pre"):
+                continue
+            found.append(path)
+    owned = [path for path in found if path.stem.startswith(song_id)]
+    packs: list[tuple[Path, int]] = []
+    for path in owned or found:
         count = sample_count(path.read_bytes()[:4096])
         if count <= 0:
             count = sample_count(path.read_bytes())
-        if count <= 0:
-            continue
-        packs.append((count, path.name, path))
-    enough = [item for item in packs if item[0] >= needed]
-    pool = enough or packs
-    if not pool:
+        if count > 0:
+            packs.append((path, count))
+    return packs
+
+
+def _pack_suffix(path: Path, song_id: str) -> str:
+    stem = path.stem
+    if song_id and stem.startswith(song_id):
+        return stem[len(song_id) :]
+    return ""
+
+
+def _choose_pack(packs: list[tuple[Path, int]], sounds: list, slot: int, song_id: str) -> Path | None:
+    """Bank whose sample list matches this chart.
+
+    Each chart's sample numbers index its own bank. The bank that just covers
+    the highest sample is the one the chart was authored against. When two
+    banks are the same length, ``a``/``h`` follow the difficulty and a trailing
+    ``1``/``2`` (or ``e``/``f``) follows SP versus DP.
+    """
+    if not packs:
         return None
-    pool.sort(key=lambda item: (item[0], item[1]))
-    return pool[0][2]
+    needed = max((sound.sample for sound in sounds if sound.sample > 0), default=0)
+    fit = [(path, count) for path, count in packs if count >= needed]
+    pool = fit or packs
+    best = min(count for _, count in pool)
+    winners = [path for path, count in pool if count == best]
+    if len(winners) == 1:
+        return winners[0]
+    return min(winners, key=lambda path: _pack_rank(path, slot, song_id))
 
 
-def _copy_media(song_id: str, source: Path, dest: Path, thumbs: Path | None, sounds: list) -> None:
+def _pack_rank(path: Path, slot: int, song_id: str) -> tuple:
+    suffix = _pack_suffix(path, song_id)
+    another = slot in {2, 8}
+    hyper = slot in {0, 6}
+    leggendaria = slot in {4, 10}
+    if another and suffix == "a":
+        rank = 0
+    elif hyper and suffix == "h":
+        rank = 0
+    elif leggendaria and suffix in {"l", "leg"}:
+        rank = 0
+    elif suffix == "a" or suffix == "h":
+        rank = 3
+    elif slot < 6 and suffix in {"", "1", "n", "b", "e"}:
+        rank = 1
+    elif slot >= 6 and suffix in {"2", "d", "f"}:
+        rank = 1
+    else:
+        rank = 2
+    return (rank, path.name)
+
+
+def _bed_key(sounds: list) -> tuple[tuple[int, int], ...]:
+    """BGM events only. Note keysounds differ on every chart of the same song."""
+    return tuple(sorted((sound.tick, sound.sample) for sound in sounds if sound.bgm))
+
+
+def _copy_media(song_id: str, source: Path, dest: Path, thumbs: Path | None, tracks: list) -> None:
     if not dest.exists():
         return
-    pack = _sound_pack(source, sounds)
-    mixed = pack is not None and mix_song(pack, sounds, dest / "base.ogg")
+    packs = _song_packs(source, song_id)
+    chosen = [
+        (index, chart_sounds, _choose_pack(packs, chart_sounds, slot, song_id))
+        for index, slot, chart_sounds in tracks
+    ]
+    base_index = -1
+    base_sounds: list = []
+    base_pack: Path | None = None
+    if chosen:
+        base_index, base_sounds, base_pack = max(chosen, key=lambda item: item[0])
+    mixed = base_pack is not None and mix_song(base_pack, base_sounds, dest / "base.ogg")
+    written_ogg: set[int] = set()
     if mixed:
-        print(f"{song_id} keysounds -> {dest.name}/base.ogg")
+        print(f"{song_id} {base_pack.name} -> {dest.name}/base.ogg")
+        base_bed = _bed_key(base_sounds)
+        for index, chart_sounds, pack in chosen:
+            if index == base_index or pack is None:
+                continue
+            if pack == base_pack and _bed_key(chart_sounds) == base_bed:
+                continue
+            if mix_song(pack, chart_sounds, dest / f"{index}.ogg"):
+                written_ogg.add(index)
+                print(f"{song_id} {pack.name} -> {dest.name}/{index}.ogg")
+        for index in range(DIFFICULTY_COUNT):
+            if index in written_ogg:
+                continue
+            leftover = dest / f"{index}.ogg"
+            if leftover.is_file():
+                leftover.unlink()
     if not mixed:
         audio = _extract_preview(source, dest / f"{song_id}.preview.wav")
         if audio is not None:
