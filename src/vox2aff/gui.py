@@ -476,7 +476,9 @@ class MainWindow(QMainWindow):
         layout.addLayout(straight)
 
         self.jacket_diff = QCheckBox("曲绘差分")
-        self.jacket_diff.setToolTip("为每个难度另写 0.jpg–4.jpg。关闭时只用最高难度封面作为 base.jpg")
+        self.jacket_diff.setToolTip(
+            "为每个难度另写 0.jpg–4.jpg。base.jpg 始终用最高难度、分辨率最高的封面"
+        )
         self.jacket_diff.toggled.connect(self._on_jacket_diff)
         layout.addWidget(self.jacket_diff)
 
@@ -515,7 +517,7 @@ class MainWindow(QMainWindow):
         stored_straight = self.settings.value("straight_laser", DEFAULT_STRAIGHT_LASER)
         straight_index = self.straight_box.findData(str(stored_straight))
         self.straight_box.setCurrentIndex(straight_index if straight_index >= 0 else 1)
-        self.jacket_diff.setChecked(_stored_bool(self.settings.value("jacket_diff", False)))
+        self.jacket_diff.setChecked(_stored_bool(self.settings.value("jacket_diff", True)))
         self._refresh_convert_button()
 
     def _browse(self, kind: str) -> None:

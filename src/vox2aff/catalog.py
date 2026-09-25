@@ -20,8 +20,11 @@ LEVEL_TO_INDEX = {
     "ultimate": 4,
 }
 SUFFIX_INDEX = {"1n": 0, "2a": 1, "3e": 2, "4i": 3, "5m": 4, "6u": 4}
-# Jacket files are jk_{id}_{1-6}.png. Ultimate shares Maximum's Arcade Plus slot.
+# Jacket files are jk_{id}_{1-6}.png, plus optional _b (big) and _s (small).
+# Ultimate shares Maximum's Arcade Plus slot.
 JACKET_INDEX = {suffix[0]: index for suffix, index in SUFFIX_INDEX.items()}
+# Higher rank is a larger SDVX jacket variant.
+_JACKET_SIZE = {"s": 0, "": 1, "b": 2}
 
 VERSIONS = {
     1: "BOOTH",
@@ -305,19 +308,56 @@ def _difficulties(node: ET.Element | None) -> dict[int, Difficulty]:
     return found
 
 
-def difficulty_jackets(folder: Path | None) -> dict[int, Path]:
-    """Map Arcade Plus difficulty slots to jacket files in a song folder.
+def _jacket_variant(path: Path) -> tuple[int, int] | None:
+    """Return (slot, size rank) for jk_{id}_{n}[_b|_s].png."""
+    stem = path.stem
+    size = ""
+    if stem.endswith("_b") or stem.endswith("_s"):
+        size = stem[-1]
+        stem = stem[:-2]
+    index = JACKET_INDEX.get(stem.rsplit("_", 1)[-1])
+    rank = _JACKET_SIZE.get(size)
+    if index is None or rank is None:
+        return None
+    return index, rank
 
-    A later file for the same slot wins, so an Ultimate jacket replaces Maximum.
+
+def _png_area(path: Path) -> int:
+    """Pixel count from a PNG header, or 0 when the file is not a PNG."""
+    try:
+        header = path.read_bytes()[:24]
+    except OSError:
+        return 0
+    if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n":
+        return 0
+    width = int.from_bytes(header[16:20], "big")
+    height = int.from_bytes(header[20:24], "big")
+    return width * height
+
+
+def difficulty_jackets(folder: Path | None) -> dict[int, Path]:
+    """Map Arcade Plus difficulty slots to the largest jacket in a song folder.
+
+    SDVX ships a medium jk_{id}_{n}.png and optional _b / _s variants. The file
+    with the most pixels wins; the size suffix breaks a tie, then a later name,
+    so an Ultimate jacket replaces Maximum of the same resolution.
     """
     if folder is None:
         return {}
-    found: dict[int, Path] = {}
-    for path in sorted(folder.glob("jk_*_[0-9].png")):
-        index = JACKET_INDEX.get(path.stem.rsplit("_", 1)[-1])
-        if index is not None and path.is_file():
-            found[index] = path
-    return found
+    found: dict[int, tuple[int, int, str, Path]] = {}
+    for path in sorted(folder.glob("jk_*.png")):
+        if not path.is_file():
+            continue
+        variant = _jacket_variant(path)
+        if variant is None:
+            continue
+        index, rank = variant
+        area = _png_area(path)
+        current = found.get(index)
+        candidate = (area, rank, path.name, path)
+        if current is None or candidate[:3] > current[:3]:
+            found[index] = candidate
+    return {index: item[3] for index, item in found.items()}
 
 
 def _charts(folder: Path | None) -> set[int]:

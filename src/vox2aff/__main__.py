@@ -64,8 +64,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--jacket-diff",
-        action="store_true",
-        help="write per-difficulty jackets (0.jpg–4.jpg). Off by default; base.jpg is the highest difficulty jacket",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="write per-difficulty jackets (0.jpg–4.jpg). On by default; base.jpg is always the highest difficulty jacket",
     )
     args = parser.parse_args(argv)
     epsilon = laser_epsilon(args.laser_strength)
@@ -110,7 +111,7 @@ def _convert_song(
     media: bool,
     laser_epsilon: float = 0.0,
     straight_laser: str = DEFAULT_STRAIGHT_LASER,
-    jacket_diff: bool = False,
+    jacket_diff: bool = True,
 ) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     info = catalog.get(folder.name)
@@ -151,7 +152,7 @@ def _convert_song(
         _copy_media(folder, dest, jacket_diff=jacket_diff)
 
 
-def _copy_media(folder: Path, dest: Path, jacket_diff: bool = False) -> None:
+def _copy_media(folder: Path, dest: Path, jacket_diff: bool = True) -> None:
     _copy_jackets(folder, dest, jacket_diff=jacket_diff)
     main: Path | None = None
     for path in sorted(folder.glob("*.s3v")):
@@ -169,16 +170,17 @@ def _copy_media(folder: Path, dest: Path, jacket_diff: bool = False) -> None:
         _encode_audio(main, dest / "base.ogg")
 
 
-def _copy_jackets(folder: Path, dest: Path, jacket_diff: bool = False) -> None:
-    """Write base.jpg from the hardest jacket, unless jacket diffs are requested.
+def _copy_jackets(folder: Path, dest: Path, jacket_diff: bool = True) -> None:
+    """Write base.jpg from the hardest jacket, and optional per-difficulty files.
 
     Arcade Plus reads 0.jpg–4.jpg before base.jpg. Those extra files are omitted
     unless jacket_diff is set, because Arcade Chan mis-loads projects that have them.
+    base.jpg stays the highest difficulty jacket either way.
     """
     jackets = difficulty_jackets(folder)
     if not jackets:
         return
-    base_index = max(jackets) if not jacket_diff else min(jackets)
+    base_index = max(jackets)
     base = jackets[base_index]
     shutil.copyfile(base, dest / "base.png")
     if _encode_jpeg(base, dest / "base.jpg"):
