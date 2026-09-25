@@ -1,8 +1,9 @@
 """Mix an IIDX chart's BGM bed and keysounds into one track.
 
-Sample numbers in the chart are 1-based indexes into the song's ``.s3p`` pack.
-Each entry is an S3V-wrapped WMA clip. Notes play the sample last assigned to
-their column. Background events play on their own, including the long bed.
+Sample numbers in the chart are 1-based indexes into the song's ``.s3p`` or
+``.2dx`` pack. Notes play the sample last assigned to their column, and a
+hold also plays the sample assigned during the hold when it ends. Background
+events play on their own, including the long bed.
 """
 
 from __future__ import annotations
@@ -53,8 +54,22 @@ def mix_song(pack: Path, sounds: list[Sound], dest: Path) -> bool:
     return result.returncode == 0 and dest.exists()
 
 
+def sample_count(data: bytes) -> int:
+    if data[:4] == b"S3P0" and len(data) >= 8:
+        return struct.unpack_from("<I", data, 4)[0]
+    return _twodx_count(data)
+
+
 def _entries(data: bytes) -> list[tuple[int, int]]:
-    if data[:4] != b"S3P0" or len(data) < 8:
+    if data[:4] == b"S3P0":
+        return _s3p_entries(data)
+    if _twodx_count(data):
+        return _twodx_entries(data)
+    return []
+
+
+def _s3p_entries(data: bytes) -> list[tuple[int, int]]:
+    if len(data) < 8:
         return []
     count = struct.unpack_from("<I", data, 4)[0]
     if count <= 0 or 8 + count * 8 > len(data):
@@ -66,6 +81,36 @@ def _entries(data: bytes) -> list[tuple[int, int]]:
             entries.append((0, 0))
             continue
         entries.append((offset, size))
+    return entries
+
+
+def _twodx_count(data: bytes) -> int:
+    """Number of clips, or 0 when the bytes are not a 2dx keysound pack."""
+    if len(data) < 76:
+        return 0
+    data_offset, count = struct.unpack_from("<II", data, 16)
+    table_end = 72 + count * 4
+    if count <= 0 or count > 10000 or data_offset != table_end or data_offset + 4 > len(data):
+        return 0
+    if data[data_offset : data_offset + 4] != b"2DX9":
+        return 0
+    return count
+
+
+def _twodx_entries(data: bytes) -> list[tuple[int, int]]:
+    count = _twodx_count(data)
+    entries: list[tuple[int, int]] = []
+    for index in range(count):
+        offset = struct.unpack_from("<I", data, 72 + index * 4)[0]
+        if offset + 12 > len(data) or data[offset : offset + 4] != b"2DX9":
+            entries.append((0, 0))
+            continue
+        header_size, payload = struct.unpack_from("<II", data, offset + 4)
+        start = offset + header_size
+        if header_size < 12 or start + payload > len(data):
+            entries.append((0, 0))
+            continue
+        entries.append((start, payload))
     return entries
 
 

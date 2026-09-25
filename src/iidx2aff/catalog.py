@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from iidx2aff.iidx import read_charts
+from iidx2aff.ifs import load_chart, read_at
 
 # game_version 0 is substream. Numbered styles match the IIDX version.
 VERSIONS = {
@@ -98,6 +99,8 @@ class Song:
     peak_level: int = 0
     folder: Path | None = None
     chart_path: Path | None = None
+    pack: Path | None = None
+    chart_span: tuple[int, int] | None = None
     jacket: Path | None = None
     movie: Path | None = None
     charts: set[int] = field(default_factory=set)
@@ -107,12 +110,31 @@ class Song:
         return f"{self.song_id:05d}"
 
     @property
+    def output_name(self) -> str:
+        ascii_name = self.ascii_name.strip().replace(" ", "_")
+        if not ascii_name:
+            return self.folder_id
+        return f"{self.folder_id}_{ascii_name}"
+
+    @property
     def label(self) -> str:
         return f"{self.folder_id} - {self.title} - {self.artist}"
 
     @property
     def number(self) -> int:
         return self.song_id
+
+    @property
+    def has_chart(self) -> bool:
+        return self.chart_path is not None or self.chart_span is not None
+
+    def chart_bytes(self) -> bytes:
+        if self.chart_path is not None:
+            return self.chart_path.read_bytes()
+        if self.pack is None or self.chart_span is None:
+            return b""
+        offset, size = self.chart_span
+        return read_at(self.pack, offset, size)
 
     def chart_rows(self) -> list[ChartInfo]:
         rows: list[ChartInfo] = []
@@ -168,7 +190,15 @@ def load_songs(data_dir: Path) -> list[Song]:
         song.folder = folder
         song.chart_path = chart
         if chart is not None:
-            _attach_chart(song, chart)
+            _attach_chart(song, chart.read_bytes())
+        else:
+            pack = _pack_file(sound, song.song_id)
+            loaded = load_chart(pack) if pack is not None else None
+            if pack is not None and loaded is not None:
+                offset, size, data = loaded
+                song.pack = pack
+                song.chart_span = (offset, size)
+                _attach_chart(song, data)
     songs.sort(key=lambda song: song.song_id)
     return songs
 
@@ -411,8 +441,18 @@ def _chart_file(sound: Path, song_id: int) -> tuple[Path | None, Path | None]:
     return None, None
 
 
-def _attach_chart(song: Song, chart: Path) -> None:
-    parsed = read_charts(chart.read_bytes())
+def _pack_file(sound: Path, song_id: int) -> Path | None:
+    if not sound.is_dir():
+        return None
+    for name in (f"{song_id:05d}.ifs", f"{song_id}.ifs"):
+        path = sound / name
+        if path.is_file():
+            return path
+    return None
+
+
+def _attach_chart(song: Song, data: bytes) -> None:
+    parsed = read_charts(data)
     song.charts = {slot for slot, _chart in parsed}
     bpms = [tempo.bpm for _slot, item in parsed for tempo in item.tempos if tempo.bpm > 0]
     if not bpms:

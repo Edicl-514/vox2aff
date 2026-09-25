@@ -1,8 +1,9 @@
 """Map one IIDX single-player chart onto Arcaea.
 
 Keys 1, 3, 5 and 7 are the four ground lanes. Keys 2, 4 and 6 are sky notes
-in the gaps. The scratch is a green arc on the left: chips stay at the top,
-holds sit at half height. Tick values are already milliseconds.
+on the lane boundaries. The scratch is a green arc on the outer edge of lane 1
+for 1P, or lane 4 for 2P. Chips stay at the top, holds sit at half height.
+Tick values are already milliseconds.
 """
 
 from __future__ import annotations
@@ -12,14 +13,17 @@ from vox2aff.aff import AffChart, Arc, ArcTap, Hold, Tap, Timing
 from iidx2aff.iidx import IidxChart, Meter, Tempo
 
 WHITE_LANE = {0: 1, 2: 2, 4: 3, 6: 4}
-BLACK_X = {1: 0.25, 3: 0.50, 5: 0.75}
+# Arcade places 4K lanes on the inner four of six lane slots. Those centers are
+# arc x -0.25, 0.25, 0.75 and 1.25, so the gaps between them are 0, 0.5 and 1.
+BLACK_X = {1: 0.00, 3: 0.50, 5: 1.00}
 SCRATCH = 7
-SCRATCH_X = 0.08
+# Left edge of lane 1, and the right edge of lane 4.
+SCRATCH_X = {"1p": -0.50, "2p": 1.50}
 SCRATCH_COLOR = 2
 HOLD_Y = 0.5
 
 
-def convert_chart(chart: IidxChart) -> AffChart:
+def convert_chart(chart: IidxChart, side: str = "1p") -> AffChart:
     aff = AffChart()
     _write_timing(aff, chart)
     for note in chart.notes:
@@ -27,7 +31,7 @@ def convert_chart(chart: IidxChart) -> AffChart:
         end = _ms(note.tick + note.length) if note.length else None
         if end is not None and end <= start:
             end = start + 1
-        _write_note(aff, note.column, start, end)
+        _write_note(aff, note.column, start, end, _scratch_x(side))
     return aff
 
 
@@ -46,7 +50,11 @@ def _write_timing(aff: AffChart, chart: IidxChart) -> None:
         aff.timings.append(Timing(_ms(tick), bpm, beats))
 
 
-def _write_note(aff: AffChart, column: int, start: int, end: int | None) -> None:
+def _scratch_x(side: str) -> float:
+    return SCRATCH_X.get(side, SCRATCH_X["1p"])
+
+
+def _write_note(aff: AffChart, column: int, start: int, end: int | None, scratch_x: float) -> None:
     lane = WHITE_LANE.get(column)
     if lane is not None:
         if end is None:
@@ -59,7 +67,7 @@ def _write_note(aff: AffChart, column: int, start: int, end: int | None) -> None
         _sky(aff, start, end, x, color=0, hold_y=1.0)
         return
     if column == SCRATCH:
-        _sky(aff, start, end, SCRATCH_X, color=SCRATCH_COLOR, hold_y=HOLD_Y)
+        _sky(aff, start, end, scratch_x, color=SCRATCH_COLOR, hold_y=HOLD_Y)
 
 
 def _sky(aff: AffChart, start: int, end: int | None, x: float, color: int, hold_y: float) -> None:

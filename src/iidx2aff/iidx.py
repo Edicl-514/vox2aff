@@ -8,7 +8,9 @@ files have fourteen slots. Single player is:
 
 Double player uses the same order from slot 6. Events are eight bytes:
 tick, type, parameter, value. A tick is a millisecond on current charts.
-Player 1 columns are keys 1-7 then the scratch.
+Player 1 columns are keys 1-7 then the scratch. A hold plays its column
+sample at the head. A sample change while that hold is still down is the
+tail sample, played when the hold ends.
 """
 
 from __future__ import annotations
@@ -77,6 +79,8 @@ def _read_chart(data: bytes, offset: int, length: int) -> IidxChart:
     tempos: list[Tempo] = []
     meters: list[Meter] = []
     sounds: list[Sound] = []
+    assigns: list[tuple[int, int, int]] = []
+    holds: list[tuple[int, int, int]] = []
     columns = [0] * 8
     end = offset + length
     cursor = offset
@@ -87,14 +91,26 @@ def _read_chart(data: bytes, offset: int, length: int) -> IidxChart:
             break
         if kind == 0x02 and param <= 7:
             columns[param] = value
+            assigns.append((tick, param, value))
         elif kind == 0x00 and param <= 7:
             notes.append(Note(tick, param, value))
             if columns[param]:
                 sounds.append(Sound(tick, columns[param], 0))
+            if value:
+                holds.append((tick, tick + value, param))
         elif kind == 0x07 and value:
             sounds.append(Sound(tick, value, param))
         elif kind == 0x04 and param:
             tempos.append(Tempo(tick, value / param))
         elif kind == 0x05 and param:
             meters.append(Meter(tick, value / param * 4))
+    # A keysound assigned while a hold is still down is its tail, played when
+    # the hold ends. The last assignment in that span wins.
+    for start, end, column in holds:
+        tail = 0
+        for tick, param, value in assigns:
+            if param == column and start < tick <= end and value:
+                tail = value
+        if tail:
+            sounds.append(Sound(end, tail, 0))
     return IidxChart(notes, tempos, meters, sounds)

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import io
+import shutil
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -53,6 +55,7 @@ from PySide6.QtWidgets import (
 from iidx2aff.__main__ import DIFFICULTY_COUNT, _copy_media, _write_song
 from iidx2aff.catalog import Song, format_bpm, load_songs, version_text
 from iidx2aff.iidx import SP_HARD_TO_EASY, SP_NAMES, read_charts
+from iidx2aff.ifs import extract
 
 try:
     from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -163,7 +166,7 @@ class SongProxy(QSortFilterProxyModel):
             return False
         if self.genre is not None and song.genre != self.genre:
             return False
-        if self.local_only and song.chart_path is None:
+        if self.local_only and not song.has_chart:
             return False
         if self.search:
             blob = "\n".join(
@@ -210,29 +213,32 @@ class ConvertWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
 
-    def run_job(self, song: Song, dest: Path, thumbs: Path | None, slots: list[int]) -> None:
-        chart = song.chart_path
-        folder = song.folder
-        if chart is None or folder is None:
+    def run_job(self, song: Song, dest: Path, thumbs: Path | None, slots: list[int], side: str) -> None:
+        if not song.has_chart:
             self.failed.emit("这首歌没有谱面文件")
             return
         if not slots:
             self.failed.emit("请至少勾选一个 SP 难度")
             return
         buffer = io.StringIO()
+        scratch: Path | None = None
         try:
             with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                source, chart, scratch = _song_files(song)
                 charts = read_charts(chart.read_bytes())
-                sounds = _write_song(chart, charts, dest, song.title, song.artist, song.rating_map(), slots)
-                _copy_media(song.folder_id, folder, dest, thumbs, sounds)
+                sounds = _write_song(chart, charts, dest, song.title, song.artist, song.rating_map(), slots, side)
+                _copy_media(song.folder_id, source, dest, thumbs, sounds)
         except Exception:
             self.failed.emit(buffer.getvalue() + traceback.format_exc())
             return
+        finally:
+            if scratch is not None:
+                shutil.rmtree(scratch, ignore_errors=True)
         self.finished.emit(buffer.getvalue().strip())
 
 
 class MainWindow(QMainWindow):
-    convert_requested = Signal(object, object, object, object)
+    convert_requested = Signal(object, object, object, object, object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -436,6 +442,16 @@ class MainWindow(QMainWindow):
         header_view.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
 
+        side_row = QHBoxLayout()
+        side_row.addWidget(QLabel("玩家"))
+        self.side_box = QComboBox()
+        self.side_box.addItem("1P（盘子在 1 轨左侧）", "1p")
+        self.side_box.addItem("2P（盘子在 4 轨右侧）", "2p")
+        self.side_box.setToolTip("白键顺序不变。1P 的盘子在最左，2P 的盘子在最右")
+        self.side_box.currentIndexChanged.connect(self._on_side)
+        side_row.addWidget(self.side_box, 1)
+        layout.addLayout(side_row)
+
         actions = QHBoxLayout()
         self.convert_button = QPushButton("转换铺面")
         self.convert_button.setObjectName("convert")
@@ -462,6 +478,9 @@ class MainWindow(QMainWindow):
         if isinstance(output, str) and output:
             self.output_dir = Path(output)
             self.output_edit.setText(output)
+        stored_side = self.settings.value("side", "1p")
+        side_index = self.side_box.findData(str(stored_side))
+        self.side_box.setCurrentIndex(side_index if side_index >= 0 else 0)
         self._refresh_convert_button()
 
     def _browse(self, kind: str) -> None:
@@ -496,7 +515,7 @@ class MainWindow(QMainWindow):
         self._fill_filters(songs)
         self.model.set_songs(songs)
         self._apply_filter()
-        with_chart = sum(song.chart_path is not None for song in songs)
+        with_chart = sum(song.has_chart for song in songs)
         with_movie = sum(song.movie is not None for song in songs)
         movie_note = f"，{with_movie} 首有 BGA" if with_movie else "，data 里没有 movie"
         self.status_label.setText(f"已加载 {len(songs)} 首歌曲，{with_chart} 首有谱面{movie_note}")
@@ -583,7 +602,7 @@ class MainWindow(QMainWindow):
         bpm = format_bpm(song.bpm_max)
         low = format_bpm(song.bpm_min)
         if not bpm:
-            self.bpm_label.setText("—" if song.chart_path is None else "谱面里没有 BPM")
+            self.bpm_label.setText("—" if not song.has_chart else "谱面里没有 BPM")
         else:
             self.bpm_label.setText(bpm if bpm == low or not low else f"{low} – {bpm}")
         self.subtitle_label.setText(song.subtitle or "—")
@@ -602,7 +621,7 @@ class MainWindow(QMainWindow):
                 self.table.setItem(row, column, QTableWidgetItem(text))
         self._filling_table = False
 
-        if song.chart_path is None:
+        if not song.has_chart:
             self.note_label.setText("sound 文件夹里没有这首歌的 .1 谱面")
         else:
             self._show_selection_note(song)
@@ -659,7 +678,7 @@ class MainWindow(QMainWindow):
                 box.blockSignals(False)
             self.status_label.setText(f"最多转换 {DIFFICULTY_COUNT} 个难度")
         song = self._current_song()
-        if song is not None and song.chart_path is not None:
+        if song is not None and song.has_chart:
             self._show_selection_note(song)
         self._refresh_convert_button()
 
@@ -675,13 +694,13 @@ class MainWindow(QMainWindow):
             self.note_label.setText("请至少勾选一个 SP 难度")
             return
         files = "、".join(f"{index}.aff" for index in range(len(names)))
-        self.note_label.setText(f"输出 {song.folder_id}：" + "、".join(names) + f" → {files}")
+        self.note_label.setText(f"输出 {song.output_name}：" + "、".join(names) + f" → {files}")
 
     def _show_output(self, song: Song) -> None:
         if self.output_dir is None:
-            self.output_label.setText(song.folder_id)
+            self.output_label.setText(song.output_name)
         else:
-            self.output_label.setText(str(self.output_dir / song.folder_id))
+            self.output_label.setText(str(self.output_dir / song.output_name))
 
     def _set_cover(self, path: Path | None) -> None:
         if path is None or not path.is_file():
@@ -718,7 +737,7 @@ class MainWindow(QMainWindow):
         song = self._current_song()
         ready = (
             song is not None
-            and song.chart_path is not None
+            and song.has_chart
             and self.output_dir is not None
             and bool(self._selected_slots())
             and not self._converting
@@ -737,21 +756,29 @@ class MainWindow(QMainWindow):
     def _convert(self) -> None:
         song = self._current_song()
         slots = self._selected_slots()
-        if song is None or song.chart_path is None or self.output_dir is None:
+        if song is None or not song.has_chart or self.output_dir is None:
             QMessageBox.information(self, "转换铺面", "请先选择歌曲和铺面输出文件夹")
             return
         if not slots:
             QMessageBox.information(self, "转换铺面", "请至少勾选一个 SP 难度")
             return
-        dest = self.output_dir / song.folder_id
+        dest = self.output_dir / song.output_name
         self._converting_name = dest.name
         self._converting = True
         names = "、".join(SP_NAMES[slot] for slot in slots)
-        self.log.setPlainText(f"开始转换 {song.label}\n{names}\n→ {dest}")
+        side = self._selected_side()
+        self.log.setPlainText(f"开始转换 {song.label}\n{side.upper()}\n{names}\n→ {dest}")
         self.status_label.setText(f"正在转换 {self._converting_name}")
         self._ensure_thread()
         self._refresh_convert_button()
-        self.convert_requested.emit(song, dest, self._thumbs_dir(), slots)
+        self.convert_requested.emit(song, dest, self._thumbs_dir(), slots, side)
+
+    def _selected_side(self) -> str:
+        side = self.side_box.currentData()
+        return side if isinstance(side, str) else "1p"
+
+    def _on_side(self) -> None:
+        self.settings.setValue("side", self._selected_side())
 
     def _ensure_thread(self) -> None:
         if self._thread is not None:
@@ -788,6 +815,20 @@ class MainWindow(QMainWindow):
             thread.quit()
             thread.wait()
         super().closeEvent(event)
+
+
+def _song_files(song: Song) -> tuple[Path, Path, Path | None]:
+    if song.folder is not None and song.chart_path is not None:
+        return song.folder, song.chart_path, None
+    if song.pack is None:
+        raise FileNotFoundError("这首歌没有谱面文件")
+    root = Path(tempfile.mkdtemp())
+    extract(song.pack, root)
+    charts = sorted(root.rglob("*.1"))
+    if not charts:
+        shutil.rmtree(root, ignore_errors=True)
+        raise FileNotFoundError(f"{song.pack.name} 里没有 .1 谱面")
+    return charts[0].parent, charts[0], root
 
 
 def main() -> int:

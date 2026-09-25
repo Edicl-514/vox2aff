@@ -10,7 +10,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from iidx2aff.audio import mix_song
+from iidx2aff.audio import mix_song, sample_count
 from iidx2aff.convert import convert_chart
 from iidx2aff.iidx import SP_HARD_TO_EASY, SP_NAMES, read_charts
 
@@ -55,13 +55,14 @@ def _write_song(
     artist: str,
     ratings: dict[int, str] | None = None,
     slots: list[int] | None = None,
+    side: str = "1p",
 ) -> list:
     by_slot = {index: chart for index, chart in charts}
     ordered = _export_slots(by_slot, slots)
     written: list[tuple[int, float, str]] = []
     used: list[int] = []
     for difficulty, slot in enumerate(ordered):
-        aff = convert_chart(by_slot[slot])
+        aff = convert_chart(by_slot[slot], side)
         if not aff.taps and not aff.holds and not aff.arcs:
             continue
         dest.mkdir(parents=True, exist_ok=True)
@@ -100,11 +101,35 @@ def _export_slots(by_slot: dict[int, object], slots: list[int] | None) -> list[i
     return [slot for slot in easy_to_hard if slot in chosen and slot in by_slot][:DIFFICULTY_COUNT]
 
 
+def _sound_pack(source: Path, sounds: list) -> Path | None:
+    """Keysound archive for this chart. Preview ``*_pre.2dx`` files are not songs."""
+    s3p = sorted(source.glob("*.s3p"))
+    if s3p:
+        return s3p[0]
+    needed = max((sound.sample for sound in sounds if sound.sample > 0), default=0)
+    packs: list[tuple[int, str, Path]] = []
+    for path in sorted(source.glob("*.2dx")):
+        if path.stem.endswith("_pre"):
+            continue
+        count = sample_count(path.read_bytes()[:4096])
+        if count <= 0:
+            count = sample_count(path.read_bytes())
+        if count <= 0:
+            continue
+        packs.append((count, path.name, path))
+    enough = [item for item in packs if item[0] >= needed]
+    pool = enough or packs
+    if not pool:
+        return None
+    pool.sort(key=lambda item: (item[0], item[1]))
+    return pool[0][2]
+
+
 def _copy_media(song_id: str, source: Path, dest: Path, thumbs: Path | None, sounds: list) -> None:
     if not dest.exists():
         return
-    packs = sorted(source.glob("*.s3p"))
-    mixed = bool(packs) and mix_song(packs[0], sounds, dest / "base.ogg")
+    pack = _sound_pack(source, sounds)
+    mixed = pack is not None and mix_song(pack, sounds, dest / "base.ogg")
     if mixed:
         print(f"{song_id} keysounds -> {dest.name}/base.ogg")
     if not mixed:
