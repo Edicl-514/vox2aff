@@ -20,6 +20,8 @@ LEVEL_TO_INDEX = {
     "ultimate": 4,
 }
 SUFFIX_INDEX = {"1n": 0, "2a": 1, "3e": 2, "4i": 3, "5m": 4, "6u": 4}
+# Jacket files are jk_{id}_{1-6}.png. Ultimate shares Maximum's Arcade Plus slot.
+JACKET_INDEX = {suffix[0]: index for suffix, index in SUFFIX_INDEX.items()}
 
 VERSIONS = {
     1: "BOOTH",
@@ -251,7 +253,7 @@ def _song_from_element(music: ET.Element, folders: dict[str, Path]) -> Song:
         peak_level=_peak_level(music.find("difficulty")),
         difficulties=_difficulties(music.find("difficulty")),
         folder=folder,
-        jackets=_jackets(folder, folder_id),
+        jackets=difficulty_jackets(folder),
         charts=_charts(folder),
     )
     return song
@@ -303,13 +305,17 @@ def _difficulties(node: ET.Element | None) -> dict[int, Difficulty]:
     return found
 
 
-def _jackets(folder: Path | None, folder_id: str) -> dict[int, Path]:
+def difficulty_jackets(folder: Path | None) -> dict[int, Path]:
+    """Map Arcade Plus difficulty slots to jacket files in a song folder.
+
+    A later file for the same slot wins, so an Ultimate jacket replaces Maximum.
+    """
     if folder is None:
         return {}
     found: dict[int, Path] = {}
-    for suffix, index in SUFFIX_INDEX.items():
-        path = folder / f"jk_{folder_id}_{suffix[0]}.png"
-        if path.is_file():
+    for path in sorted(folder.glob("jk_*_[0-9].png")):
+        index = JACKET_INDEX.get(path.stem.rsplit("_", 1)[-1])
+        if index is not None and path.is_file():
             found[index] = path
     return found
 

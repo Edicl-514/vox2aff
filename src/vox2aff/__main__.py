@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -10,7 +11,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from vox2aff.catalog import LEVEL_TO_INDEX, SUFFIX_INDEX, restore_db_text
+from vox2aff.catalog import LEVEL_TO_INDEX, SUFFIX_INDEX, difficulty_jackets, restore_db_text
 from vox2aff.convert import (
     DEFAULT_LASER_STRENGTH,
     DEFAULT_STRAIGHT_LASER,
@@ -61,6 +62,11 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_STRAIGHT_LASER,
         help="straight lasers: keep, noinput (shown, no judgment, default), or black (guide line)",
     )
+    parser.add_argument(
+        "--jacket-diff",
+        action="store_true",
+        help="write per-difficulty jackets (0.jpg–4.jpg). Off by default; base.jpg is the highest difficulty jacket",
+    )
     args = parser.parse_args(argv)
     epsilon = laser_epsilon(args.laser_strength)
     straight = straight_laser_mode(args.straight_laser)
@@ -86,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
             media=not args.no_media,
             laser_epsilon=epsilon,
             straight_laser=straight,
+            jacket_diff=args.jacket_diff,
         )
     return 0
 
@@ -103,6 +110,7 @@ def _convert_song(
     media: bool,
     laser_epsilon: float = 0.0,
     straight_laser: str = DEFAULT_STRAIGHT_LASER,
+    jacket_diff: bool = False,
 ) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     info = catalog.get(folder.name)
@@ -140,14 +148,11 @@ def _convert_song(
     arcade.mkdir(exist_ok=True)
     (arcade / "Project.arcade").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     if media:
-        _copy_media(folder, dest)
+        _copy_media(folder, dest, jacket_diff=jacket_diff)
 
 
-def _copy_media(folder: Path, dest: Path) -> None:
-    jackets = sorted(folder.glob("jk_*_[0-9].png"))
-    if jackets:
-        shutil.copyfile(jackets[0], dest / "base.png")
-        _run_ffmpeg(["-y", "-i", str(jackets[0]), str(dest / "base.jpg")])
+def _copy_media(folder: Path, dest: Path, jacket_diff: bool = False) -> None:
+    _copy_jackets(folder, dest, jacket_diff=jacket_diff)
     main: Path | None = None
     for path in sorted(folder.glob("*.s3v")):
         parts = path.stem.split("_")
@@ -162,6 +167,47 @@ def _copy_media(folder: Path, dest: Path) -> None:
         main = path
     if main is not None:
         _encode_audio(main, dest / "base.ogg")
+
+
+def _copy_jackets(folder: Path, dest: Path, jacket_diff: bool = False) -> None:
+    """Write base.jpg from the hardest jacket, unless jacket diffs are requested.
+
+    Arcade Plus reads 0.jpg–4.jpg before base.jpg. Those extra files are omitted
+    unless jacket_diff is set, because Arcade Chan mis-loads projects that have them.
+    """
+    jackets = difficulty_jackets(folder)
+    if not jackets:
+        return
+    base_index = max(jackets) if not jacket_diff else min(jackets)
+    base = jackets[base_index]
+    shutil.copyfile(base, dest / "base.png")
+    if _encode_jpeg(base, dest / "base.jpg"):
+        print(f"jacket {base.name} -> {dest.name}/base.jpg")
+    written: set[int] = set()
+    if jacket_diff:
+        base_digest = _digest(base)
+        for index, path in sorted(jackets.items()):
+            if index == base_index or _digest(path) == base_digest:
+                continue
+            target = dest / f"{index}.jpg"
+            if _encode_jpeg(path, target):
+                written.add(index)
+                print(f"jacket {path.name} -> {dest.name}/{target.name}")
+    for index in range(DIFFICULTY_COUNT):
+        if index in written:
+            continue
+        leftover = dest / f"{index}.jpg"
+        if leftover.is_file():
+            leftover.unlink()
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _encode_jpeg(source: Path, dest: Path) -> bool:
+    _run_ffmpeg(["-y", "-i", str(source), str(dest)])
+    return dest.is_file() and dest.stat().st_size > 0
 
 
 def _encode_audio(source: Path, dest: Path) -> None:
