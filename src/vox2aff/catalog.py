@@ -6,22 +6,25 @@ difficulty metadata come from ``data/others/music_db.xml``.
 
 from __future__ import annotations
 
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Arcade Plus only opens 0.aff–4.aff. Ultimate uses the last slot, the same one as Maximum.
+# Arcade Plus slots are Arcaea Past, Present, Future, Beyond, Eternal.
+# Novice, advanced, and exhaust take the first three. A song's top chart is one
+# of infinite (named from inf_ver) or maximum, and that chart is Beyond.
+# Ultimate, when present, is Eternal.
 LEVEL_TO_INDEX = {
     "novice": 0,
     "advanced": 1,
     "exhaust": 2,
     "infinite": 3,
-    "maximum": 4,
+    "maximum": 3,
     "ultimate": 4,
 }
-SUFFIX_INDEX = {"1n": 0, "2a": 1, "3e": 2, "4i": 3, "5m": 4, "6u": 4}
+SUFFIX_INDEX = {"1n": 0, "2a": 1, "3e": 2, "4i": 3, "5m": 3, "6u": 4}
 # Jacket files are jk_{id}_{1-6}.png, plus optional _b (big) and _s (small).
-# Ultimate shares Maximum's Arcade Plus slot.
 JACKET_INDEX = {suffix[0]: index for suffix, index in SUFFIX_INDEX.items()}
 # Higher rank is a larger SDVX jacket variant.
 _JACKET_SIZE = {"s": 0, "": 1, "b": 2}
@@ -49,7 +52,7 @@ GENRE_BITS = (
 )
 
 INFINITE_NAMES = {2: "INF", 3: "GRV", 4: "HVN", 5: "VVD", 6: "XCD", 7: "NBL"}
-DIFFICULTY_NAMES = ("NOV", "ADV", "EXH", "INF", "MXM")
+DIFFICULTY_NAMES = ("NOV", "ADV", "EXH", "INF", "ULT")
 
 # music_db stores letters the arcade font lacks as rare kanji.
 _DB_CHARACTERS = str.maketrans(
@@ -111,6 +114,20 @@ class Difficulty:
     kind: str = ""
 
 
+@dataclass(frozen=True)
+class ChartCredit:
+    """One difficulty's level, jacket designer, and chart designer.
+
+    ``effector`` in the SDVX database is the chart author (``effected_by``).
+    ``illustrator`` is the jacket artist.
+    """
+
+    rating: str = ""
+    jacket_designer: str = ""
+    chart_designer: str = ""
+    constant: float = 0.0
+
+
 @dataclass
 class Song:
     music_id: str
@@ -136,22 +153,54 @@ class Song:
 
     @property
     def output_name(self) -> str:
-        return f"{self.folder_id}_{self.ascii_name}"
+        ascii_name = _folder_piece(self.ascii_name.strip())
+        if not ascii_name:
+            return self.folder_id
+        return f"{self.folder_id}_{ascii_name}"
 
     @property
     def label(self) -> str:
         return f"{self.folder_id} - {self.title} - {self.artist}"
 
     def difficulty_name(self, index: int) -> str:
+        item = self.difficulties.get(index)
+        if item is not None and item.kind == "maximum":
+            return "MXM"
+        if index == 4 or (item is not None and item.kind == "ultimate"):
+            return "ULT"
         if index == 3:
             return INFINITE_NAMES.get(self.inf_ver, "INF")
-        item = self.difficulties.get(index)
-        if item is not None and item.kind == "ultimate":
-            return "ULT"
         return DIFFICULTY_NAMES[index]
 
     def rating_map(self) -> dict[int, str]:
         return {index: item.level for index, item in self.difficulties.items() if item.level}
+
+    def credit_map(self) -> dict[int, ChartCredit]:
+        return {
+            index: chart_credit(item.level, item.illustrator, item.effector)
+            for index, item in self.difficulties.items()
+        }
+
+
+def chart_credit(level: str, jacket_designer: str, chart_designer: str) -> ChartCredit:
+    """``level`` is the SDVX constant, such as ``19.8``. Rating is its integer part."""
+    text = level.strip()
+    if not text:
+        return ChartCredit("", jacket_designer, chart_designer, 0.0)
+    try:
+        constant = float(text)
+    except ValueError:
+        return ChartCredit("", jacket_designer, chart_designer, 0.0)
+    if constant <= 0:
+        return ChartCredit("", jacket_designer, chart_designer, 0.0)
+    return ChartCredit(str(int(constant)), jacket_designer, chart_designer, constant)
+
+
+_INVALID_FOLDER = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _folder_piece(text: str) -> str:
+    return _INVALID_FOLDER.sub("_", text).rstrip(" .")
 
 
 def project_folder_name(name: str, six_key: bool = False, arrange: str = "off") -> str:

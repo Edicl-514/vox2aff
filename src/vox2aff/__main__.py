@@ -16,6 +16,8 @@ from vox2aff.arrange import MODES, apply_arrange, normalize_arrange
 from vox2aff.catalog import (
     LEVEL_TO_INDEX,
     SUFFIX_INDEX,
+    ChartCredit,
+    chart_credit,
     difficulty_jackets,
     project_folder_name,
     restore_db_text,
@@ -135,7 +137,7 @@ def _song_folders(source: Path) -> list[Path]:
 def _convert_song(
     folder: Path,
     dest: Path,
-    catalog: dict[str, tuple[str, str, dict[int, str]]],
+    catalog: dict[str, tuple[str, str, dict[int, ChartCredit]]],
     media: bool,
     laser_epsilon: float = 0.0,
     straight_laser: str = DEFAULT_STRAIGHT_LASER,
@@ -146,7 +148,7 @@ def _convert_song(
 ) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     info = catalog.get(folder.name)
-    titles = info[2] if info else {}
+    credits = info[2] if info else {}
     difficulties: list[dict | None] = [None] * DIFFICULTY_COUNT
     base_bpm = 0.0
     last_diff = 0
@@ -166,8 +168,8 @@ def _convert_song(
         bpm = vox.bpms[0].bpm
         if base_bpm == 0.0:
             base_bpm = bpm
-        rating = titles.get(difficulty, "")
-        difficulties[difficulty] = {"Rating": rating, "BaseBpm": bpm}
+        credit = credits.get(difficulty, ChartCredit())
+        difficulties[difficulty] = _difficulty_meta(credit, bpm)
         last_diff = difficulty
         print(f"{vox_path.name} -> {dest.name}/{difficulty}.aff")
     title, artist = (info[0], info[1]) if info else (folder.name, "")
@@ -184,6 +186,22 @@ def _convert_song(
     (arcade / "Project.arcade").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     if media:
         _copy_media(folder, dest, jacket_diff=jacket_diff)
+
+
+def _difficulty_meta(credit: ChartCredit, bpm: float) -> dict:
+    """One Arcade Chan difficulty. Empty designers stay null, matching a hand-edited project."""
+    return {
+        "Rating": credit.rating,
+        "JacketDesign": credit.jacket_designer or None,
+        "ChartDesign": credit.chart_designer or None,
+        "RatingConstant": credit.constant,
+        "AudioOverride": 0,
+        "TitleOverride": "",
+        "ArtistOverride": "",
+        "BaseBpm": bpm,
+        "BaseBpmOverride": -1.0,
+        "BackgroundOverride": "",
+    }
 
 
 def _copy_media(folder: Path, dest: Path, jacket_diff: bool = True) -> None:
@@ -259,7 +277,7 @@ def _run_ffmpeg(args: list[str]) -> None:
         print(result.stderr[-500:], file=sys.stderr)
 
 
-def _load_catalog(path: Path) -> dict[str, tuple[str, str, dict[int, str]]]:
+def _load_catalog(path: Path) -> dict[str, tuple[str, str, dict[int, ChartCredit]]]:
     raw = path.read_bytes()
     for encoding in ("cp932", "shift_jis", "utf-8"):
         try:
@@ -270,7 +288,7 @@ def _load_catalog(path: Path) -> dict[str, tuple[str, str, dict[int, str]]]:
     else:
         text = raw.decode("cp932", errors="replace")
     root = ET.fromstring(text)
-    catalog: dict[str, tuple[str, str, dict[int, str]]] = {}
+    catalog: dict[str, tuple[str, str, dict[int, ChartCredit]]] = {}
     for music in root.findall("music"):
         info = music.find("info")
         if info is None:
@@ -281,7 +299,7 @@ def _load_catalog(path: Path) -> dict[str, tuple[str, str, dict[int, str]]]:
             key = f"{int(music_id):04d}_{ascii_name}"
         else:
             key = ascii_name or music_id
-        ratings: dict[int, str] = {}
+        credits: dict[int, ChartCredit] = {}
         difficulty = music.find("difficulty")
         if difficulty is not None:
             for name, index in LEVEL_TO_DIFF.items():
@@ -289,13 +307,19 @@ def _load_catalog(path: Path) -> dict[str, tuple[str, str, dict[int, str]]]:
                 if node is None:
                     continue
                 level = node.findtext("difnum")
-                if level:
+                shown = ""
+                if level and level.strip().lstrip("-").isdigit():
                     value = int(level) / 10
-                    ratings[index] = str(int(value)) if value.is_integer() else f"{value:.1f}"
+                    shown = str(int(value)) if value.is_integer() else f"{value:.1f}"
+                credits[index] = chart_credit(
+                    shown,
+                    restore_db_text((node.findtext("illustrator") or "").strip()),
+                    restore_db_text((node.findtext("effected_by") or "").strip()),
+                )
         catalog[key] = (
             restore_db_text(info.findtext("title_name") or key),
             restore_db_text(info.findtext("artist_name") or ""),
-            ratings,
+            credits,
         )
     return catalog
 

@@ -7,6 +7,7 @@ BGA files live under ``movie/``; a data set with that folder removed has no BGA.
 
 from __future__ import annotations
 
+import re
 import struct
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -111,7 +112,7 @@ class Song:
 
     @property
     def output_name(self) -> str:
-        ascii_name = self.ascii_name.strip().replace(" ", "_")
+        ascii_name = _folder_piece(self.ascii_name.strip().replace(" ", "_"))
         if not ascii_name:
             return self.folder_id
         return f"{self.folder_id}_{ascii_name}"
@@ -154,6 +155,15 @@ class Song:
 
     def rating_map(self) -> dict[int, str]:
         return {slot: str(level) for slot, level in ((row.slot, row.level) for row in self.chart_rows()) if level > 0}
+
+
+# A name like ``n/a`` must stay one folder. These characters are illegal in a
+# Windows path component, and ``/`` plus ``\`` are separators on every platform.
+_INVALID_FOLDER = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _folder_piece(text: str) -> str:
+    return _INVALID_FOLDER.sub("_", text).rstrip(" .")
 
 
 def version_text(version: int) -> str:
@@ -311,7 +321,9 @@ def _read_entry(cursor: _Cursor, version: int) -> Song:
         cursor.skip(4)
     if subtitle == "0":
         subtitle = ""
-    peak = max(levels) if levels else 0
+    # Song list sorts on this. SP is the first five entries; DP follows and is ignored.
+    sp_levels = levels[:5]
+    peak = max(sp_levels) if sp_levels else 0
     return Song(
         song_id=song_id,
         title=title,

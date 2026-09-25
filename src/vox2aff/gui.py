@@ -860,7 +860,7 @@ class MainWindow(QMainWindow):
             self.convert_failed.emit("这首歌没有谱面文件夹")
             return
         catalog = {
-            folder.name: (song.title, song.artist, song.rating_map()),
+            folder.name: (song.title, song.artist, song.credit_map()),
         }
         buffer = io.StringIO()
         try:
