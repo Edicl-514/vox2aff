@@ -8,13 +8,14 @@ events play on their own, including the long bed.
 
 from __future__ import annotations
 
-import array
 import math
 import shutil
 import struct
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import numpy as np
 
 from iidx2aff.iidx import Sound
 
@@ -38,13 +39,7 @@ def mix_song(pack: Path, sounds: list[Sound], dest: Path) -> bool:
         if clip is not None:
             length = max(length, sound.tick + _duration_ms(clip))
     frames = int(length * RATE / 1000) + RATE
-    mix = array.array("i", bytes(frames * 2 * 4))
-    for sound in sounds:
-        clip = clips.get(sound.sample)
-        if clip is None:
-            continue
-        _add(mix, frames, clip, int(sound.tick * RATE / 1000), _gains(sound.pan))
-    pcm = _limit(mix)
+    pcm = _limit(_mix(sounds, clips, frames))
     dest.parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
         ["ffmpeg", "-y", "-v", "error", "-f", "s16le", "-ar", str(RATE), "-ac", "2", "-i", "pipe:0", "-c:a", "libvorbis", "-q:a", "6", str(dest)],
@@ -156,22 +151,47 @@ def _gains(pan: int) -> tuple[float, float]:
     return math.cos(angle), math.sin(angle)
 
 
-def _add(mix: array.array, frames: int, pcm: bytes, start: int, gains: tuple[float, float]) -> None:
-    samples = array.array("h")
-    samples.frombytes(pcm[: len(pcm) // 4 * 4])
+def _mix(sounds: list[Sound], clips: dict[int, bytes], frames: int) -> np.ndarray:
+    """Sum every clip into one int64 stereo buffer.
+
+    Gain is applied once per sample and pan, with truncation toward zero, the
+    same rounding the old per-sample loop used. The accumulator is wider than
+    int32 so dense overlaps stay exact until the limiter.
+    """
+    mix = np.zeros(frames * 2, dtype=np.int64)
+    scaled: dict[tuple[int, int], np.ndarray] = {}
+    for sound in sounds:
+        pcm = clips.get(sound.sample)
+        if pcm is None:
+            continue
+        key = (sound.sample, sound.pan)
+        clip = scaled.get(key)
+        if clip is None:
+            clip = _scale(pcm, _gains(sound.pan))
+            scaled[key] = clip
+        start = int(sound.tick * RATE / 1000)
+        count = min(len(clip) // 2, frames - start)
+        if count <= 0:
+            continue
+        end = count * 2
+        at = start * 2
+        mix[at : at + end] += clip[:end]
+    return mix
+
+
+def _scale(pcm: bytes, gains: tuple[float, float]) -> np.ndarray:
+    aligned = pcm[: len(pcm) // 4 * 4]
+    stereo = np.frombuffer(aligned, dtype=np.int16).astype(np.float64).reshape(-1, 2)
+    scaled = np.empty(stereo.shape, dtype=np.int32)
     gain_l, gain_r = gains
-    count = min(len(samples) // 2, frames - start)
-    if count <= 0:
-        return
-    left = start * 2
-    for index in range(count):
-        mix[left] += int(samples[index * 2] * gain_l)
-        mix[left + 1] += int(samples[index * 2 + 1] * gain_r)
-        left += 2
+    scaled[:, 0] = stereo[:, 0] * gain_l
+    scaled[:, 1] = stereo[:, 1] * gain_r
+    return scaled.reshape(-1)
 
 
-def _limit(mix: array.array) -> bytes:
-    peak = max((abs(sample) for sample in mix), default=0)
-    scale = 32767 / peak if peak > 32767 else 1.0
-    out = array.array("h", (max(-32767, min(32767, int(sample * scale))) for sample in mix))
+def _limit(mix: np.ndarray) -> bytes:
+    peak = int(np.max(np.abs(mix))) if mix.size else 0
+    if peak > 32767:
+        mix = np.trunc(mix * (32767.0 / peak))
+    out = np.clip(mix, -32767, 32767).astype(np.int16)
     return out.tobytes()
