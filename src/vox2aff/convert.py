@@ -283,15 +283,41 @@ def _segment_to_arcs(
                 arc.noinput = True
             elif straight_laser == "black":
                 arc.is_void = True
+        _split_straight_joint(arcs, arc)
         aff.arcs.append(arc)
         arcs.append(arc)
     return arcs
 
 
+def _split_straight_joint(previous: list[Arc], arc: Arc) -> None:
+    """Keep a straight laser from joining the curve before or after it.
+
+    Arcade draws and judges arcs that meet at the same time as one laser, so a
+    black line glued to a curved arc is shown and played as part of that arc.
+    """
+    if not previous:
+        return
+    prior = previous[-1]
+    if prior.is_void == arc.is_void and prior.noinput == arc.noinput:
+        return
+    if arc.time > prior.end:
+        return
+    if arc.end - arc.time > prior.end - prior.time:
+        arc.time = prior.end + 1
+        if arc.time >= arc.end:
+            arc.time = arc.end - 1
+            prior.end = max(prior.time + 1, arc.time - 1)
+    else:
+        prior.end = arc.time - 1
+        if prior.end <= prior.time:
+            prior.end = prior.time + 1
+            arc.time = min(arc.end - 1, prior.end + 1)
+
+
 def _is_straight_laser(x_start: float, x_end: float) -> bool:
-    # The file writes x to two decimals. A segment that stays on one of those
-    # positions is a straight laser: SDVX does not require the knob there.
-    return round(x_start, 2) == round(x_end, 2)
+    # The file writes x to two decimals. A 6K stretch turns one SDVX knob step
+    # into 0.01, which still does not need to be held.
+    return abs(round(x_start, 2) - round(x_end, 2)) <= 0.025
 
 
 def _write_fx(aff: AffChart, chart: VoxChart, timeline: Timeline, six_key: bool = False) -> None:
@@ -341,11 +367,19 @@ def _write_fx_lanes(aff: AffChart, chart: VoxChart, timeline: Timeline) -> None:
 
 
 def _merge_touching(spans: list[tuple[int, int, float]]) -> list[tuple[int, int, float]]:
-    """Join FX holds that meet, so Arcade does not draw a new head at the joint."""
+    """Join FX holds on the same lane that meet, so Arcade does not draw a new head.
+
+    Other lanes can sit between two pieces of the same hold in time order, so the
+    match has to be the previous span of this lane, not the previous span overall.
+    """
     merged: list[tuple[int, int, float]] = []
+    latest: dict[float, int] = {}
     for start, end, key in sorted(spans):
-        if merged and merged[-1][2] == key and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end), key)
+        index = latest.get(key)
+        if index is not None and start <= merged[index][1]:
+            prev_start, prev_end, _key = merged[index]
+            merged[index] = (prev_start, max(prev_end, end), key)
             continue
+        latest[key] = len(merged)
         merged.append((start, end, key))
     return merged
