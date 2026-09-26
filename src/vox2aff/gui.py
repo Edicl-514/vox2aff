@@ -404,7 +404,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
 
         self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["难度", "等级", "谱师", "效果", "谱面"])
+        self.table.setHorizontalHeaderLabels(["难度", "等级", "Effected by", "Illustrated by", "谱面"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -670,8 +670,8 @@ class MainWindow(QMainWindow):
             values = [
                 song.difficulty_name(index),
                 info.level if info and info.level else "—",
-                info.illustrator if info and info.illustrator else "—",
                 info.effector if info and info.effector else "—",
+                info.illustrator if info and info.illustrator else "—",
                 "有" if index in song.charts else "无",
             ]
             for column, text in enumerate(values):
